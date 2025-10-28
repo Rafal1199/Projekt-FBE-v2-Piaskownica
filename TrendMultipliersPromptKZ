@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Mnożniki dla prognoz (Konto Zwykłe)</title>
+    <style>
+      body {
+        font-family: 'Google Sans', Arial, sans-serif;
+        padding: 20px;
+        margin: 0;
+        color: #202124;
+      }
+      
+      h2 {
+        margin: 0 0 8px 0;
+        font-size: 18px;
+        font-weight: 500;
+      }
+      
+      .subtitle {
+        color: #5f6368;
+        font-size: 13px;
+        margin-bottom: 20px;
+        line-height: 1.4;
+      }
+      
+      .field-group {
+        margin-bottom: 16px;
+      }
+      
+      label {
+        display: block;
+        margin-bottom: 6px;
+        font-weight: 500;
+        font-size: 14px;
+        color: #3c4043;
+      }
+      
+      input[type="number"] {
+        width: 100%;
+        padding: 10px;
+        border: 1px solid #dadce0;
+        border-radius: 4px;
+        font-size: 14px;
+        box-sizing: border-box;
+      }
+      
+      input[type="number"]:focus {
+        outline: none;
+        border-color: #1a73e8;
+        box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.2);
+      }
+      
+      .example {
+        font-size: 12px;
+        color: #5f6368;
+        margin-top: 4px;
+      }
+      
+      .buttons {
+        display: flex;
+        gap: 12px;
+        margin-top: 24px;
+        align-items: center;
+      }
+      
+      button {
+        padding: 10px 24px;
+        border: none;
+        border-radius: 4px;
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+      
+      #applyBtn {
+        background: #1a73e8;
+        color: white;
+      }
+      
+      #applyBtn:hover:not(:disabled) {
+        background: #1557b0;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+      }
+      
+      #applyBtn:disabled {
+        background: #dadce0;
+        color: #80868b;
+        cursor: not-allowed;
+      }
+      
+      #cancelBtn {
+        background: white;
+        color: #5f6368;
+        border: 1px solid #dadce0;
+      }
+      
+      #cancelBtn:hover {
+        background: #f8f9fa;
+      }
+      
+      .spinner {
+        display: none;
+        width: 16px;
+        height: 16px;
+        border: 2px solid #f3f3f3;
+        border-top: 2px solid #1a73e8;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      
+      @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+      
+      .info-box {
+        background: #e8f0fe;
+        border-left: 3px solid #1a73e8;
+        padding: 12px;
+        margin-bottom: 20px;
+        font-size: 13px;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>📊 Mnożniki dla prognoz (Konto Zwykłe)</h2>
+    <p class="subtitle">
+      Prognozuj sezonowość dla konta zwykłego.<br>
+      <strong>0%</strong> = bez zmian | <strong>100%</strong> = podwojenie | <strong>-50%</strong> = połowa
+    </p>
+    
+    <div class="info-box">
+      💡 <strong>Przykład:</strong> Jeśli bazowa prognoza to 10 szt., a wpiszesz +100%, wynik będzie 20 szt.
+    </div>
+    
+    <div class="field-group">
+      <label for="mult1">Miesiąc +1 (następny miesiąc)</label>
+      <input type="number" id="mult1" value="0" step="1">
+      <div class="example">np. 50 = wzrost o 50%, -30 = spadek o 30%</div>
+    </div>
+    
+    <div class="field-group">
+      <label for="mult2">Miesiąc +2 (za dwa miesiące)</label>
+      <input type="number" id="mult2" value="0" step="1">
+      <div class="example">np. 100 = podwojenie prognozy</div>
+    </div>
+    
+    <div class="field-group">
+      <label for="mult3">Miesiąc +3 (za trzy miesiące)</label>
+      <input type="number" id="mult3" value="0" step="1">
+      <div class="example">np. -100 = spadek do zera</div>
+    </div>
+    
+    <div class="buttons">
+      <button id="applyBtn" onclick="apply()">
+        Zastosuj i przelicz
+      </button>
+      <button id="cancelBtn" onclick="cancel()">
+        Anuluj
+      </button>
+      <div id="spinner" class="spinner"></div>
+    </div>
+
+    <script>
+      function apply() {
+        const m1 = parseFloat(document.getElementById('mult1').value) || 0;
+        const m2 = parseFloat(document.getElementById('mult2').value) || 0;
+        const m3 = parseFloat(document.getElementById('mult3').value) || 0;
+        
+        if (!isFinite(m1) || !isFinite(m2) || !isFinite(m3)) {
+          alert('Podaj prawidłowe liczby (mogą być ujemne).');
+          return;
+        }
+        
+        const applyBtn = document.getElementById('applyBtn');
+        const cancelBtn = document.getElementById('cancelBtn');
+        const spinner = document.getElementById('spinner');
+        
+        applyBtn.disabled = true;
+        cancelBtn.disabled = true;
+        applyBtn.textContent = 'Przeliczam...';
+        spinner.style.display = 'inline-block';
+        
+        google.script.run
+          .withSuccessHandler(onSuccess)
+          .withFailureHandler(onFailure)
+          .computeTrendsRegularWithMultipliers(m1, m2, m3);
+      }
+      
+      function onSuccess() {
+        google.script.host.close();
+      }
+      
+      function onFailure(error) {
+        const applyBtn = document.getElementById('applyBtn');
+        const cancelBtn = document.getElementById('cancelBtn');
+        const spinner = document.getElementById('spinner');
+        
+        spinner.style.display = 'none';
+        applyBtn.disabled = false;
+        cancelBtn.disabled = false;
+        applyBtn.textContent = 'Zastosuj i przelicz';
+        
+        alert('Błąd:\n' + (error.message || error));
+      }
+      
+      function cancel() {
+        google.script.host.close();
+      }
+      
+      window.addEventListener('load', function() {
+        document.getElementById('mult1').focus();
+      });
+    </script>
+  </body>
+</html>
