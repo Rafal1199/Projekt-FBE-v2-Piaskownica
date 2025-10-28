@@ -1,0 +1,240 @@
+/**
+ * Funkcja wywoływana z menu - otwiera dialog do generowania raportu
+ */
+function cmd_generatePartnerReport() {
+  try {
+    ensureAuthWithPartner_();
+    requireActivePartner_();
+  } catch (e) {
+    SpreadsheetApp.getUi().alert('Błąd autoryzacji/partnera:\n' + (e && (e.message || e)));
+    return;
+  }
+
+  const t = HtmlService.createTemplateFromFile('GenerujRaportPartneraPrompt');
+  const html = t.evaluate().setWidth(600).setHeight(650);
+  SpreadsheetApp.getUi().showModalDialog(html, '📧 Generuj raport dla partnera');
+}
+
+/**
+ * Główna funkcja generująca raport
+ */
+function generujRaportPartnera(params) {
+  const dataFBE = params.includeFBE ? getProductsToReplenishFBE_(params.fbeThreshold, params.fbeMinSum3m) : [];
+  const dataKZ = params.includeKZ ? getProductsFromKZ_(params.kzMinSum3m) : [];
+  
+  const report = {
+    partner: getActivePartnerId_(),
+    date: new Date(),
+    productsFBE: dataFBE,
+    productsKZ: dataKZ,
+    summary: {
+      totalFBE: dataFBE.length,
+      totalKZ: dataKZ.length,
+      totalValue: calculateTotalValue_(dataFBE, dataKZ)
+    }
+  };
+  
+  if (params.outputFormat === 'email' || params.outputFormat === 'both') {
+    sendReportEmail_(report, params.emailTo);
+  }
+  
+  if (params.outputFormat === 'docx' || params.outputFormat === 'both') {
+    // TODO: implementacja eksportu do DOCX jeśli potrzebne
+    SpreadsheetApp.getUi().alert('Eksport do DOCX nie jest jeszcze zaimplementowany.');
+  }
+}
+
+/**
+ * Pobiera produkty do uzupełnienia z FBE
+ */
+function getProductsToReplenishFBE_(coverageThreshold, minSum3m) {
+  const sh = SpreadsheetApp.getActive().getSheetByName('Trendy_FBE');
+  if (!sh) return [];
+  
+  const data = sh.getDataRange().getValues();
+  if (data.length < 2) return [];
+  
+  const headers = data[0];
+  
+  const idx = {
+    pnk: headers.indexOf('part_number_key'),
+    id: headers.indexOf('ID'),
+    sku: headers.indexOf('SKU'),
+    ean: headers.indexOf('EAN'),
+    sum3m: headers.indexOf('Suma_3M'),
+    avg3m: headers.indexOf('Średnia_3M'),
+    fc1: headers.indexOf('Prognoza_nast_M'),
+    stock: headers.indexOf('Stock'),
+    priceNet: headers.indexOf('Cena_netto'),
+    coverage: headers.indexOf('Pokrycie_magazynu'),
+    classification: headers.indexOf('Klasyfikacja')
+  };
+  
+  const results = [];
+  
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const coverage = String(row[idx.coverage] || '').trim();
+    const sum3m = Number(row[idx.sum3m] || 0);
+    
+    if (coverage === coverageThreshold && sum3m >= minSum3m) {
+      const stockCurrent = Number(row[idx.stock] || 0);
+      const fc1 = Number(row[idx.fc1] || 0);
+      const toOrder = Math.max(0, fc1 - stockCurrent);
+      
+      results.push({
+        pnk: row[idx.pnk],
+        id: row[idx.id],
+        sku: row[idx.sku],
+        ean: row[idx.ean],
+        sum3m: sum3m,
+        avg3m: row[idx.avg3m],
+        fc1: fc1,
+        stock: stockCurrent,
+        priceNet: row[idx.priceNet],
+        toOrder: toOrder,
+        classification: row[idx.classification],
+        source: 'FBE'
+      });
+    }
+  }
+  
+  results.sort((a, b) => b.sum3m - a.sum3m);
+  return results;
+}
+
+/**
+ * Pobiera produkty z konta zwykłego (które nie ma na FBE)
+ */
+function getProductsFromKZ_(minSum3m) {
+  const sh = SpreadsheetApp.getActive().getSheetByName('Trendy_KZ');
+  if (!sh) return [];
+  
+  const data = sh.getDataRange().getValues();
+  if (data.length < 2) return [];
+  
+  const headers = data[0];
+  
+  const idx = {
+    pnk: headers.indexOf('part_number_key'),
+    id: headers.indexOf('ID'),
+    sku: headers.indexOf('SKU'),
+    ean: headers.indexOf('EAN'),
+    sum3m: headers.indexOf('Suma_3M'),
+    avg3m: headers.indexOf('Średnia_3M'),
+    fc1: headers.indexOf('Prognoza_nast_M'),
+    stock: headers.indexOf('Stock'),
+    priceNet: headers.indexOf('Cena_netto'),
+    classification: headers.indexOf('Klasyfikacja')
+  };
+  
+  const fbeStockMap = getFBEStockMap_();
+  const results = [];
+  
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const pnk = String(row[idx.pnk] || '').trim();
+    const sum3m = Number(row[idx.sum3m] || 0);
+    
+    if (sum3m >= minSum3m && (!fbeStockMap.has(pnk) || fbeStockMap.get(pnk) === 0)) {
+      results.push({
+        pnk: pnk,
+        id: row[idx.id],
+        sku: row[idx.sku],
+        ean: row[idx.ean],
+        sum3m: sum3m,
+        avg3m: row[idx.avg3m],
+        fc1: row[idx.fc1],
+        stock: row[idx.stock],
+        priceNet: row[idx.priceNet],
+        classification: row[idx.classification],
+        source: 'KZ_NEW'
+      });
+    }
+  }
+  
+  results.sort((a, b) => b.sum3m - a.sum3m);
+  return results;
+}
+
+/**
+ * Wysyła raport emailem
+ */
+function sendReportEmail_(report, emailTo) {
+  const subject = `📦 Raport uzupełnienia magazynu FBE – ${report.partner} – ${formatDateHelper_(report.date)}`;
+  
+  const htmlBody = HtmlService.createTemplateFromFile('EmailRaportTemplate');
+  htmlBody.report = report;
+  htmlBody.formatDate_ = formatDateHelper_;
+  
+  const html = htmlBody.evaluate()
+    .setTitle('Raport')
+    .setSandboxMode(HtmlService.SandboxMode.IFRAME)
+    .getContent();
+  
+  // ✅ Wymuszenie UTF-8
+  const htmlWithEncoding = '<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body>' + html + '</body></html>';
+  
+  GmailApp.sendEmail(emailTo, subject, 'Raport w załączniku (HTML)', {
+    htmlBody: htmlWithEncoding,
+    name: 'Olimp Marketplace Team'
+  });
+}
+
+/**
+ * Zwraca mapę PNK → Stock z Trendy_FBE
+ */
+function getFBEStockMap_() {
+  const map = new Map();
+  const sh = SpreadsheetApp.getActive().getSheetByName('Trendy_FBE');
+  if (!sh) return map;
+  
+  const data = sh.getDataRange().getValues();
+  if (data.length < 2) return map;
+  
+  const headers = data[0];
+  const idxPnk = headers.indexOf('part_number_key');
+  const idxStock = headers.indexOf('Stock');
+  
+  if (idxPnk === -1 || idxStock === -1) return map;
+  
+  for (let i = 1; i < data.length; i++) {
+    const pnk = String(data[i][idxPnk] || '').trim();
+    const stock = Number(data[i][idxStock] || 0);
+    if (pnk) map.set(pnk, stock);
+  }
+  
+  return map;
+}
+
+/**
+ * Oblicza całkowitą wartość zamówienia
+ */
+function calculateTotalValue_(dataFBE, dataKZ) {
+  let total = 0;
+  
+  dataFBE.forEach(p => {
+    const price = Number(p.priceNet || 0);
+    const qty = Number(p.toOrder || 0);
+    total += price * qty;
+  });
+  
+  dataKZ.forEach(p => {
+    const price = Number(p.priceNet || 0);
+    const qty = Number(p.fc1 || 0);
+    total += price * qty;
+  });
+  
+  return Math.round(total * 100) / 100;
+}
+
+/**
+ * Formatuje datę do polskiego formatu
+ */
+function formatDateHelper_(date) {
+  const d = new Date(date);
+  const day = String(d.getDate()).padStart(2, '0');
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const year = d.getFullYear();
+  return `${day}.${month}.${year}`;
+}
