@@ -386,28 +386,20 @@ function cmd_clearSheetsForPartner() {
     }
     
     try {
-    if (typeof ensureGlobalHeaderStyling_ === 'function') {
-      ensureGlobalHeaderStyling_();
-    } else if (typeof ensureBoldHeadersAllSheets_ === 'function') {
-      ensureBoldHeadersAllSheets_();
+      if (typeof ensureGlobalHeaderStyling_ === 'function') {
+        ensureGlobalHeaderStyling_();
+      } else if (typeof ensureBoldHeadersAllSheets_ === 'function') {
+        ensureBoldHeadersAllSheets_();
+      }
+    } catch (e) {
+      Logger.log('Global header styling failed: ' + (e && (e.stack || e.message) || e));
     }
-    
-    sheets.forEach(function(sh) {
-      var name = sh.getName();
-      if (name === 'Partnerzy' || name === 'LOGS') return;
-      
-      try {
-        applyDefaultHeaderWidths_(sh);
-      } catch (_) {}
-    });
-    
-  } catch (_) {}
   
-  ss.toast('Arkusze partnera wyczyszczone ✅', 'Programy', 5);
-  } finally {
-    try { updateBacklogActivePartner_(''); } catch (_) {}
-    lock.releaseLock();
-  }
+    ss.toast('Arkusze partnera wyczyszczone ✅', 'Programy', 5);
+    } finally {
+      try { updateBacklogActivePartner_(''); } catch (_) {}
+      lock.releaseLock();
+    }
 }
 
 function resetPartnerSheetHeader_(sh) {
@@ -437,7 +429,8 @@ function resetPartnerSheetHeader_(sh) {
     // ZMIANA: usunięto Deficyt_w_miesiącu_1 i Miesiące_pokrycia (duplikat)
     header = ['part_number_key', 'ID', 'SKU', 'EAN', '3 miesiące wstecz', 'Sprzedaż dwa miesiące wstecz', 'Sprzedaż ubiegły miesiąc', 'Sprzedaż w obecnym miesiącu', 'Trend_M0/M-1_%', 'Trend_M-1/M-2_%', 'Trend_M-2/M-3_%', 'Suma_3M', 'Średnia_3M', 'Suma_6M', 'Średnia_6M', 'Slope_6M', 'Klasyfikacja', 'Performance', 'Prognoza_nast_M', 'Prognoza_+2M', 'Prognoza_+3M', 'Stock', 'Cena_netto', 'Cena_brutto', 'Pokrycie_magazynu'];
   } else if (name === 'Trendy_KZ') {
-    header = ['part_number_key', 'ID', 'SKU', 'EAN', '3 miesiące wstecz', 'Sprzedaż dwa miesiące wstecz', 'Sprzedaż ubiegły miesiąc', 'Sprzedaż w obecnym miesiącu', 'Trend_M0/M-1_%', 'Trend_M-1/M-2_%', 'Trend_M-2/M-3_%', 'Suma_3M', 'Średnia_3M', 'Suma_6M', 'Średnia_6M', 'Slope_6M', 'Klasyfikacja', 'Performance', 'Prognoza_nast_M', 'Prognoza_+2M', 'Prognoza_+3M', 'Stock', 'Cena_netto', 'Cena_brutto', 'Pokrycie_magazynu', 'Obrót_3M_netto', 'Udział_w_obrócie_%', 'Rotacja_magazynu'];
+    // ✅ FIX: Używamy funkcji zamiast hardcoded array
+    header = buildTrendyKzHeader_(0, 0, 0);
   } else if (name === 'Ceny_miesięczne_KZ') {
     header = buildPartnerPriceHeaderKz_();
   }
@@ -448,6 +441,29 @@ function resetPartnerSheetHeader_(sh) {
   var maxCols = Math.max(header.length, sh.getMaxColumns());
   clearHeaderRow_(sh, maxCols);
   sh.getRange(1, 1, 1, header.length).setValues([header]);
+  if (maxCols > header.length) {
+    try { sh.getRange(1, header.length + 1, 1, maxCols - header.length).clearContent(); } catch (_) {}
+  }
+  
+  // ✅ FIX: Dodajemy formatowanie ZARAZ PO ustawieniu wartości
+  try {
+    applySingleSheetHeaderStyling_(sh);
+  } catch (e) {
+    Logger.log('applySingleSheetHeaderStyling_ failed for ' + name + ': ' + (e && (e.stack || e.message) || e));
+  }
+  
+  // ✅ Specjalna obsługa dla Trendy_FBE
+  if (name === 'Trendy_FBE' && typeof ensurePersistentHelperColumns_ === 'function') {
+    try { ensurePersistentHelperColumns_(sh); } catch (e) {
+      Logger.log('ensurePersistentHelperColumns_ failed: ' + (e && (e.stack || e.message) || e));
+    }
+  }
+  
+  try { applyDefaultHeaderWidths_(sh, header); } catch (e) {
+    Logger.log('applyDefaultHeaderWidths_ failed for ' + name + ': ' + (e && (e.stack || e.message) || e));
+  }
+  
+  return true;  
   
   if (maxCols > header.length) {
     try { sh.getRange(1, header.length + 1, 1, maxCols - header.length).clearContent(); } catch (_) {}
@@ -860,4 +876,63 @@ function calculateOptimalWidth_(headerText) {
   var MAX_WIDTH = 250;
   
   return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, totalWidth));
+}
+
+/**
+ * Buduje nagłówek dla Trendy_KZ z uwzględnieniem mnożników
+ * ZAWSZE używaj tej funkcji zamiast hardcoded array
+ */
+function buildTrendyKzHeader_(mult1, mult2, mult3) {
+  mult1 = mult1 || 0;
+  mult2 = mult2 || 0;
+  mult3 = mult3 || 0;
+  
+  const formatMultiplier = (m) => {
+    if (m === 0) return '';
+    const sign = m > 0 ? '+' : '';
+    return ` [${sign}${m}%]`;
+  };
+  
+  return [
+    'part_number_key', 'ID', 'SKU', 'EAN',
+    '3 miesiące wstecz', 'Sprzedaż dwa miesiące wstecz', 'Sprzedaż ubiegły miesiąc', 'Sprzedaż w obecnym miesiącu',
+    'Trend_M0/M-1_%', 'Trend_M-1/M-2_%', 'Trend_M-2/M-3_%',
+    'Suma_3M', 'Średnia_3M', 'Suma_6M', 'Średnia_6M', 'Slope_6M', 'Klasyfikacja',
+    'Performance',
+    `Prognoza_nast_M${formatMultiplier(mult1)}`,
+    `Prognoza_+2M${formatMultiplier(mult2)}`,
+    `Prognoza_+3M${formatMultiplier(mult3)}`,
+    'Stock', 'Cena_netto', 'Cena_brutto', 'Pokrycie_magazynu',
+    'Obrót_3M_netto', 'Udział_w_obrócie_%', 'Rotacja_magazynu'
+  ];
+}
+
+/**
+ * Formatuje nagłówki dla JEDNEGO arkusza
+ * Wywołaj zaraz po setValues, aby zapewnić prawidłowe formatowanie
+ */
+function applySingleSheetHeaderStyling_(sh) {
+  if (!sh) return;
+  
+  var LIGHT_GREEN = '#b7e1cd';
+  var lc = sh.getLastColumn();
+  if (lc < 1) return;
+  
+  var hdrRng = sh.getRange(1, 1, 1, lc);
+  var hdrVals = hdrRng.getDisplayValues()[0];
+  
+  // Ustaw format
+  hdrRng
+    .setFontFamily('Arial')
+    .setFontSize(10)
+    .setFontWeight('bold')
+    .setHorizontalAlignment('center')
+    .setVerticalAlignment('middle');
+  
+  // Ustaw kolory tła
+  var row = [];
+  for (var i = 0; i < lc; i++) {
+    row.push(String(hdrVals[i] || '').trim() ? LIGHT_GREEN : '#ffffff');
+  }
+  hdrRng.setBackgrounds([row]);
 }
