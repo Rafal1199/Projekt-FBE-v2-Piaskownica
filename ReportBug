@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Zgłoś błąd</title>
+    <style>
+      body {
+        font-family: 'Google Sans', Arial, sans-serif;
+        padding: 20px;
+        margin: 0;
+        color: #202124;
+      }
+      
+      h2 {
+        margin: 0 0 8px 0;
+        font-size: 20px;
+        font-weight: 500;
+      }
+      
+      .subtitle {
+        color: #5f6368;
+        font-size: 13px;
+        margin-bottom: 20px;
+      }
+      
+      label {
+        display: block;
+        margin-bottom: 8px;
+        font-weight: 500;
+        font-size: 14px;
+      }
+      
+      textarea {
+        width: 100%;
+        min-height: 200px;
+        padding: 12px;
+        border: 1px solid #dadce0;
+        border-radius: 8px;
+        font-family: Arial, sans-serif;
+        font-size: 14px;
+        resize: vertical;
+        box-sizing: border-box;
+      }
+      
+      textarea:focus {
+        outline: none;
+        border-color: #1a73e8;
+        box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.2);
+      }
+      
+      .buttons {
+        display: flex;
+        gap: 12px;
+        margin-top: 20px;
+        align-items: center;
+      }
+      
+      button {
+        padding: 10px 24px;
+        border: none;
+        border-radius: 4px;
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+      
+      #sendBtn {
+        background: #1a73e8;
+        color: white;
+      }
+      
+      #sendBtn:hover:not(:disabled) {
+        background: #1557b0;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+      }
+      
+      #sendBtn:disabled {
+        background: #dadce0;
+        color: #80868b;
+        cursor: not-allowed;
+      }
+      
+      #cancelBtn {
+        background: white;
+        color: #5f6368;
+        border: 1px solid #dadce0;
+      }
+      
+      #cancelBtn:hover {
+        background: #f8f9fa;
+      }
+      
+      .spinner {
+        display: none;
+        width: 16px;
+        height: 16px;
+        border: 2px solid #f3f3f3;
+        border-top: 2px solid #1a73e8;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      
+      @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+      
+      .status {
+        display: none;
+        padding: 12px 16px;
+        border-radius: 8px;
+        margin-top: 16px;
+        font-size: 14px;
+        animation: slideIn 0.3s ease;
+      }
+      
+      @keyframes slideIn {
+        from {
+          opacity: 0;
+          transform: translateY(-10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      
+      .status.success {
+        background: #e6f4ea;
+        color: #137333;
+        border: 1px solid #81c995;
+      }
+      
+      .status.error {
+        background: #fce8e6;
+        color: #c5221f;
+        border: 1px solid #f6aea9;
+      }
+      
+      .char-count {
+        text-align: right;
+        font-size: 12px;
+        color: #5f6368;
+        margin-top: 4px;
+      }
+      
+      .context-info {
+        background: #f8f9fa;
+        padding: 12px;
+        border-radius: 8px;
+        font-size: 12px;
+        color: #5f6368;
+        margin-bottom: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Zgłoś błąd lub sugestię</h2>
+    <p class="subtitle">
+      Twoja opinia pomaga nam ulepszać aplikację. Dziękujemy! 🙏
+    </p>
+    
+    <div class="context-info">
+      📍 Aktywny partner: <strong><?= activePartner ?></strong>
+    </div>
+    
+    <label for="message">
+      Opisz problem lub podziel się pomysłem:
+    </label>
+    <textarea 
+      id="message" 
+      placeholder="Przykład: Po kliknięciu 'Przelicz trendy' aplikacja zawiesza się na 2 minuty..."
+      maxlength="2000"
+      oninput="updateCharCount()"
+    ></textarea>
+    <div class="char-count">
+      <span id="charCount">0</span> / 2000 znaków
+    </div>
+    
+    <div class="buttons">
+      <button id="sendBtn" onclick="send()">
+        Wyślij
+      </button>
+      <button id="cancelBtn" onclick="cancel()">
+        Anuluj
+      </button>
+      <div id="spinner" class="spinner"></div>
+    </div>
+    
+    <div id="status" class="status"></div>
+
+    <script>
+      function updateCharCount() {
+        const textarea = document.getElementById('message');
+        const count = document.getElementById('charCount');
+        count.textContent = textarea.value.length;
+      }
+      
+      function send() {
+        const message = document.getElementById('message').value.trim();
+        const sendBtn = document.getElementById('sendBtn');
+        const cancelBtn = document.getElementById('cancelBtn');
+        const spinner = document.getElementById('spinner');
+        const status = document.getElementById('status');
+        
+        if (!message) {
+          showStatus('Wpisz treść wiadomości', 'error');
+          return;
+        }
+        
+        // Zablokuj przyciski
+        sendBtn.disabled = true;
+        cancelBtn.disabled = true;
+        sendBtn.textContent = 'Wysyłam...';
+        spinner.style.display = 'inline-block';
+        status.style.display = 'none';
+        
+        // Wyślij przez Google Apps Script
+        google.script.run
+          .withSuccessHandler(onSuccess)
+          .withFailureHandler(onFailure)
+          .sendBugReport(message);
+      }
+      
+      function onSuccess() {
+        const spinner = document.getElementById('spinner');
+        const status = document.getElementById('status');
+        const sendBtn = document.getElementById('sendBtn');
+        
+        spinner.style.display = 'none';
+        sendBtn.textContent = 'Wysłano ✓';
+        sendBtn.style.background = '#34a853';
+        
+        showStatus('✅ Dziękujemy! Wiadomość została wysłana.', 'success');
+        
+        // Zamknij okno po 2 sekundach
+        setTimeout(function() {
+          google.script.host.close();
+        }, 2000);
+      }
+      
+      function onFailure(error) {
+        const sendBtn = document.getElementById('sendBtn');
+        const cancelBtn = document.getElementById('cancelBtn');
+        const spinner = document.getElementById('spinner');
+        
+        spinner.style.display = 'none';
+        sendBtn.disabled = false;
+        cancelBtn.disabled = false;
+        sendBtn.textContent = 'Wyślij';
+        
+        showStatus('❌ Błąd wysyłania: ' + (error.message || error), 'error');
+      }
+      
+      function showStatus(message, type) {
+        const status = document.getElementById('status');
+        status.textContent = message;
+        status.className = 'status ' + type;
+        status.style.display = 'block';
+      }
+      
+      function cancel() {
+        google.script.host.close();
+      }
+      
+      // Autofocus na textarea
+      window.addEventListener('load', function() {
+        document.getElementById('message').focus();
+      });
+    </script>
+  </body>
+</html>
