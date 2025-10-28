@@ -408,6 +408,7 @@ function resetPartnerSheetHeader_(sh) {
   var name = sh.getName();
   if (!name) return false;
   
+  // Specjalna obsługa dla Ceny_miesięczne_FBE
   if (name === 'Ceny_miesięczne_FBE' && typeof writeEmptyPricingTable_ === 'function') {
     var headerFbe = buildPartnerPriceHeaderFbe_();
     ensureMinColumns_(sh, headerFbe.length);
@@ -421,15 +422,21 @@ function resetPartnerSheetHeader_(sh) {
     return true;
   }
   
+  // Buduj nagłówek dla pozostałych arkuszy
   var header = null;
   
   if (name === 'Sprzedaż_okresowa_FBE' || name === 'Sprzedaż_okresowa_KZ') {
     header = buildPartnerSalesHeader_(typeof START_YEAR === 'number' ? START_YEAR : 2025, typeof START_MONTH === 'number' ? START_MONTH : 1);
   } else if (name === 'Trendy_FBE') {
-    // ZMIANA: usunięto Deficyt_w_miesiącu_1 i Miesiące_pokrycia (duplikat)
-    header = ['part_number_key', 'ID', 'SKU', 'EAN', '3 miesiące wstecz', 'Sprzedaż dwa miesiące wstecz', 'Sprzedaż ubiegły miesiąc', 'Sprzedaż w obecnym miesiącu', 'Trend_M0/M-1_%', 'Trend_M-1/M-2_%', 'Trend_M-2/M-3_%', 'Suma_3M', 'Średnia_3M', 'Suma_6M', 'Średnia_6M', 'Slope_6M', 'Klasyfikacja', 'Performance', 'Prognoza_nast_M', 'Prognoza_+2M', 'Prognoza_+3M', 'Stock', 'Cena_netto', 'Cena_brutto', 'Pokrycie_magazynu'];
+    // ✅ FIX: Używamy podstawowych nagłówków (BEZ mnożników - będą dodane przy przeliczeniu)
+    header = ['part_number_key', 'ID', 'SKU', 'EAN', 
+              '3 miesiące wstecz', 'Sprzedaż dwa miesiące wstecz', 'Sprzedaż ubiegły miesiąc', 'Sprzedaż w obecnym miesiącu', 
+              'Trend_M0/M-1_%', 'Trend_M-1/M-2_%', 'Trend_M-2/M-3_%', 
+              'Suma_3M', 'Średnia_3M', 'Suma_6M', 'Średnia_6M', 'Slope_6M', 'Klasyfikacja',
+              'Performance',
+              'Prognoza_nast_M', 'Prognoza_+2M', 'Prognoza_+3M', 
+              'Stock', 'Cena_netto', 'Cena_brutto', 'Pokrycie_magazynu'];
   } else if (name === 'Trendy_KZ') {
-    // ✅ FIX: Używamy funkcji zamiast hardcoded array
     header = buildTrendyKzHeader_(0, 0, 0);
   } else if (name === 'Ceny_miesięczne_KZ') {
     header = buildPartnerPriceHeaderKz_();
@@ -437,43 +444,62 @@ function resetPartnerSheetHeader_(sh) {
   
   if (!header || !header.length) return false;
   
+  // Upewnij się że jest wystarczająco kolumn
   ensureMinColumns_(sh, header.length);
   var maxCols = Math.max(header.length, sh.getMaxColumns());
+  
+  // Wyczyść cały wiersz nagłówkowy
   clearHeaderRow_(sh, maxCols);
+  
+  // Ustaw wartości nagłówków
   sh.getRange(1, 1, 1, header.length).setValues([header]);
+  
+  // Wyczyść nadmiarowe kolumny
   if (maxCols > header.length) {
     try { sh.getRange(1, header.length + 1, 1, maxCols - header.length).clearContent(); } catch (_) {}
   }
   
-  // ✅ FIX: Dodajemy formatowanie ZARAZ PO ustawieniu wartości
-  try {
-    applySingleSheetHeaderStyling_(sh);
-  } catch (e) {
-    Logger.log('applySingleSheetHeaderStyling_ failed for ' + name + ': ' + (e && (e.stack || e.message) || e));
-  }
-  
-  // ✅ Specjalna obsługa dla Trendy_FBE
+  // ✅ SPECJALNA OBSŁUGA DLA TRENDY_FBE
   if (name === 'Trendy_FBE' && typeof ensurePersistentHelperColumns_ === 'function') {
-    try { ensurePersistentHelperColumns_(sh); } catch (e) {
+    try { 
+      ensurePersistentHelperColumns_(sh);
+      Logger.log('resetPartnerSheetHeader_: Trendy_FBE - kolumny Z i AA utworzone');
+    } catch (e) {
       Logger.log('ensurePersistentHelperColumns_ failed: ' + (e && (e.stack || e.message) || e));
+    }
+    
+    // ✅ FORMATUJ WSZYSTKIE KOLUMNY (w tym Z i AA)
+    try {
+      applySingleSheetHeaderStyling_(sh);
+      Logger.log('resetPartnerSheetHeader_: Trendy_FBE - formatowanie zastosowane dla ' + sh.getLastColumn() + ' kolumn');
+    } catch (e) {
+      Logger.log('applySingleSheetHeaderStyling_ failed for Trendy_FBE: ' + (e && (e.stack || e.message) || e));
+    }
+    
+    // ✅ DOPASUJ SZEROKOŚCI WSZYSTKICH KOLUMN
+    try {
+      var currentLc = sh.getLastColumn();
+      var currentHeader = sh.getRange(1, 1, 1, currentLc).getDisplayValues()[0];
+      applyDefaultHeaderWidths_(sh, currentHeader);
+      Logger.log('resetPartnerSheetHeader_: Trendy_FBE - szerokości dopasowane dla ' + currentLc + ' kolumn');
+    } catch (e) {
+      Logger.log('applyDefaultHeaderWidths_ failed for Trendy_FBE: ' + (e && (e.message || e)));
+    }
+  } else {
+    // ✅ DLA POZOSTAŁYCH ARKUSZY - standardowe formatowanie
+    try {
+      applySingleSheetHeaderStyling_(sh);
+    } catch (e) {
+      Logger.log('applySingleSheetHeaderStyling_ failed for ' + name + ': ' + (e && (e.stack || e.message) || e));
+    }
+    
+    try { 
+      applyDefaultHeaderWidths_(sh, header); 
+    } catch (e) {
+      Logger.log('applyDefaultHeaderWidths_ failed for ' + name + ': ' + (e && (e.message || e)));
     }
   }
   
-  try { applyDefaultHeaderWidths_(sh, header); } catch (e) {
-    Logger.log('applyDefaultHeaderWidths_ failed for ' + name + ': ' + (e && (e.stack || e.message) || e));
-  }
-  
-  return true;  
-  
-  if (maxCols > header.length) {
-    try { sh.getRange(1, header.length + 1, 1, maxCols - header.length).clearContent(); } catch (_) {}
-  }
-  
-  if (name === 'Trendy_FBE' && typeof ensurePersistentHelperColumns_ === 'function') {
-    try { ensurePersistentHelperColumns_(sh); } catch (_) {}
-  }
-  
-  try { applyDefaultHeaderWidths_(sh, header); } catch (_) {}
   return true;
 }
 
