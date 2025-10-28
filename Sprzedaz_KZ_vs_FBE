@@ -1,0 +1,219 @@
+/**
+ * Sprzedaż KZ vs FBE — porównanie wolumenów w ostatnich miesiącach.
+ */
+
+const COMPARE_CFG = {
+  OUT_SHEET: 'Sprzedaż KZ vs FBE',
+  SOURCE_SHEET: 'Zamówienia',
+  MONTH_COUNT: 3,
+  DAY_THRESHOLD: 10,
+  PRODUCTS_HDRS: ['products', 'items', 'line_items', 'pozycje', 'pozycje_zamówienia', 'order_items'],
+  DATE_HDRS: ['created', 'order_date', 'created_at', 'data zamówienia', 'data_zamowienia', 'date', 'order_created', 'data'],
+  STATUS_HDRS: ['status', 'order_status', 'status zamówienia', 'status_zamowienia'],
+  FALLBACK_COL_DATE: 5,    // kolumna E (1-based)
+  FALLBACK_COL_STATUS: 10, // kolumna J (1-based)
+  COLOR_KZ: '#e8f4fd',
+  COLOR_FBE: '#fef3e0',
+  MONTH_NAMES_PL: ['Styczeń','Luty','Marzec','Kwiecień','Maj','Czerwiec','Lipiec','Sierpień','Wrzesień','Październik','Listopad','Grudzień']
+};
+
+const ALLOWED_ORDER_STATUSES_COMPARE = (typeof ALLOWED_ORDER_STATUSES_KZ !== 'undefined'
+  ? ALLOWED_ORDER_STATUSES_KZ
+  : (typeof ALLOWED_ORDER_STATUSES_REG !== 'undefined'
+      ? ALLOWED_ORDER_STATUSES_REG
+      : new Set([1, 2, 3, 4])));
+
+function cmd_buildSalesComparisonKzFbe() {
+  const ui = SpreadsheetApp.getUi();
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(8000)) { ui.alert('Program jest zajęty. Spróbuj za chwilę.'); return; }
+  try {
+    ensureAuthWithPartner_();
+    requireActivePartner_();
+    SpreadsheetApp.getActive().toast('Porównuję sprzedaż KZ vs FBE…', 'Programy', 5);
+    buildSalesComparisonKzFbe();
+    SpreadsheetApp.getActive().toast('Porównanie sprzedaży gotowe ✅', 'Programy', 5);
+  } catch (e) {
+    ui.alert('Błąd porównania sprzedaży:\n' + (e && (e.stack || e.message) || e));
+    throw e;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function buildSalesComparisonKzFbe() {
+  requireActivePartner_();
+  const home = getHome_();
+  const today = new Date();
+  const months = comparisonComputeMonths_(today);
+  if (!months.length) throw new Error('Brak miesięcy do porównania.');
+
+  const monthIndex = new Map(months.map((m, idx) => [m.key, idx]));
+  const monthsLen = months.length;
+
+  const kzData = readComparisonOrders_(getSS_Ro_, 'konto zwykłe', monthIndex, monthsLen);
+  const fbeData = readComparisonOrders_(getSS_RoFbe_, 'FBE', monthIndex, monthsLen);
+
+  const header = ['Part_Number_Key'];
+  months.forEach(m => {
+    header.push(m.label + ' KZ');
+    header.push(m.label + ' FBE');
+  });
+
+  const out = [header];
+  const allKeys = new Set();
+  kzData.forEach((_, key) => allKeys.add(key));
+  fbeData.forEach((_, key) => allKeys.add(key));
+  const sortedKeys = Array.from(allKeys).sort();
+
+  for (const key of sortedKeys) {
+    const kzRec = kzData.get(key) || createComparisonRecord_(monthsLen);
+    const fbeRec = fbeData.get(key) || createComparisonRecord_(monthsLen);
+    const totalQty = sumArray_(kzRec.qty) + sumArray_(fbeRec.qty);
+    if (totalQty < 1) continue;
+
+    const row = [key];
+    for (let i = 0; i < monthsLen; i++) {
+      row.push(kzRec.qty[i] || 0);
+      row.push(fbeRec.qty[i] || 0);
+    }
+    out.push(row);
+  }
+
+  let outSh = home.getSheetByName(COMPARE_CFG.OUT_SHEET) || home.insertSheet(COMPARE_CFG.OUT_SHEET);
+  outSh.clear();
+  setValuesChunked_(outSh, 1, 1, out, 20000);
+  outSh.setFrozenRows(1);
+
+  if (out.length > 0) {
+    const rows = out.length;
+    const cols = out[0].length;
+    const fullRange = outSh.getRange(1, 1, rows, cols);
+    fullRange.setFontFamily('Arial').setFontSize(10);
+    outSh.getRange(1, 1, 1, cols).setHorizontalAlignment('center');
+    outSh.getRange(1, 1, 1, cols).setFontWeight('bold');
+    outSh.getRange(1, 1, rows, 1).setBackground('#ffffff');
+    
+    // Kolorowanie kolumn KZ i FBE (to pozostaje bez zmian)
+    for (let i = 0; i < monthsLen; i++) {
+      const colKz = 2 + i * 2;
+      const colFbe = colKz + 1;
+      outSh.getRange(1, colKz, rows, 1).setBackground(COMPARE_CFG.COLOR_KZ);
+      outSh.getRange(1, colFbe, rows, 1).setBackground(COMPARE_CFG.COLOR_FBE);
+    }
+    
+    // ✅ ZMIANA: Dopasuj szerokość do nagłówków
+    try { 
+      applyDefaultHeaderWidths_(outSh, header); 
+    } catch (e) {
+      Logger.log('Błąd dopasowania szerokości KZ vs FBE: ' + (e && (e.message || e)));
+    }
+  }
+}
+
+function readComparisonOrders_(ssGetter, label, monthIndex, monthsLen) {
+  const map = new Map();
+  const ss = ssGetter();
+  if (!ss) throw new Error('Brak źródła zamówień (' + label + ') w rejestrze partnerów.');
+  const sh = ss.getSheetByName(COMPARE_CFG.SOURCE_SHEET);
+  if (!sh) throw new Error('Brak zakładki "' + COMPARE_CFG.SOURCE_SHEET + '" w źródle (' + label + ').');
+
+  const fetch = () => sh.getDataRange().getValues();
+  const vals = (typeof withRetry_ === 'function') ? withRetry_(fetch, 'getValues') : fetch();
+  if (vals.length < 2) return map;
+
+  const header = vals[0].map(h => String(h || '').trim().toLowerCase());
+  const idxProducts = findCol_(header, COMPARE_CFG.PRODUCTS_HDRS);
+  if (idxProducts === -1) throw new Error('Nie znaleziono kolumny z pozycjami zamówienia w źródle (' + label + ').');
+
+  const idxDateHdr = findCol_(header, COMPARE_CFG.DATE_HDRS);
+  const idxDate = (idxDateHdr !== -1) ? idxDateHdr : (COMPARE_CFG.FALLBACK_COL_DATE - 1);
+  if (idxDate < 0) throw new Error('Nie znaleziono kolumny daty w źródle (' + label + ').');
+
+  const idxStatusHdr = findCol_(header, COMPARE_CFG.STATUS_HDRS);
+  const idxStatus = (idxStatusHdr !== -1) ? idxStatusHdr : (COMPARE_CFG.FALLBACK_COL_STATUS - 1);
+
+  for (let r = 1; r < vals.length; r++) {
+    const row = vals[r];
+
+    if (idxStatus >= 0 && idxStatus < row.length) {
+      const st = comparisonNormalizeStatus_(row[idxStatus]);
+      if (st === null || !ALLOWED_ORDER_STATUSES_COMPARE.has(st)) continue;
+    }
+
+    const date = normalizeDate_(row[idxDate]);
+    if (!date) continue;
+    const idxMonth = monthIndex.get(yyyymmKey_(date));
+    if (idxMonth === undefined) continue;
+
+    const items = extractItemsFromProducts_(row[idxProducts]);
+    if (!items.length) continue;
+
+    for (const item of items) {
+      const key = String(item.partKey || '').trim();
+      if (!key) continue;
+      const qty = Number(item.qty || 0) || 1;
+      if (!map.has(key)) {
+        map.set(key, createComparisonRecord_(monthsLen));
+      }
+      const rec = map.get(key);
+      rec.qty[idxMonth] += qty;
+    }
+  }
+
+  return map;
+}
+
+function comparisonComputeMonths_(today) {
+  const includeCurrent = today.getDate() >= COMPARE_CFG.DAY_THRESHOLD;
+  const months = [];
+  const endOffset = includeCurrent ? 0 : -1;
+  const startOffset = endOffset - (COMPARE_CFG.MONTH_COUNT - 1);
+  for (let offset = startOffset; offset <= endOffset; offset++) {
+    const point = comparisonShiftMonth_(today.getFullYear(), today.getMonth() + 1, offset);
+    const key = point.year + '-' + String(point.month).padStart(2, '0');
+    const label = COMPARE_CFG.MONTH_NAMES_PL[point.month - 1];
+    months.push({ key: key, label: label, year: point.year, month: point.month });
+  }
+  return months;
+}
+
+function comparisonShiftMonth_(year, month, delta) {
+  let y = year;
+  let m = month + delta;
+  while (m < 1) { m += 12; y -= 1; }
+  while (m > 12) { m -= 12; y += 1; }
+  return { year: y, month: m };
+}
+
+function createComparisonRecord_(monthsLen) {
+  return { qty: Array(monthsLen).fill(0) };
+}
+
+function sumArray_(arr) {
+  return arr.reduce((s, v) => s + (Number(v) || 0), 0);
+}
+
+function comparisonNormalizeStatus_(value) {
+  if (typeof normalizeStatusForRegular_ === 'function') {
+    return normalizeStatusForRegular_(value);
+  }
+  if (typeof normalizeStatus_ === 'function') {
+    return normalizeStatus_(value);
+  }
+  if (value === null || typeof value === 'undefined' || value === '') return null;
+  if (value instanceof Date && !isNaN(value)) {
+    const msPerDay = 24 * 60 * 60 * 1000;
+    const epoch = Date.UTC(1899, 11, 30);
+    const utc = Date.UTC(value.getFullYear(), value.getMonth(), value.getDate());
+    const serial = Math.round((utc - epoch) / msPerDay);
+    return Number.isFinite(serial) ? serial : null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+  const match = String(value).trim().match(/-?\d+/);
+  if (!match) return null;
+  const num = Number(match[0]);
+  return Number.isFinite(num) ? Math.trunc(num) : null;
+}
