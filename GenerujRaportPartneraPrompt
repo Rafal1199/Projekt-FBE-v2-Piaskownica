@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8"> <!-- ✅ TO -->
+  <base target="_top">
+  <title>Generuj raport</title>
+  <style>
+    body {
+      font-family: 'Google Sans', Arial, sans-serif;
+      padding: 20px;
+      color: #202124;
+    }
+    
+    h2 {
+      margin: 0 0 8px 0;
+      font-size: 20px;
+      font-weight: 500;
+    }
+    
+    .subtitle {
+      color: #5f6368;
+      font-size: 13px;
+      margin-bottom: 20px;
+    }
+    
+    .field-group {
+      margin-bottom: 16px;
+    }
+    
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-weight: 500;
+      font-size: 14px;
+    }
+    
+    input[type="email"],
+    input[type="text"],
+    input[type="number"] {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #dadce0;
+      border-radius: 4px;
+      font-size: 14px;
+      box-sizing: border-box;
+    }
+    
+    input:focus {
+      outline: none;
+      border-color: #1a73e8;
+      box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.2);
+    }
+    
+    .buttons {
+      display: flex;
+      gap: 12px;
+      margin-top: 24px;
+    }
+    
+    button {
+      padding: 10px 24px;
+      border: none;
+      border-radius: 4px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    
+    #generateBtn {
+      background: #1a73e8;
+      color: white;
+    }
+    
+    #generateBtn:hover {
+      background: #1557b0;
+    }
+    
+    #cancelBtn {
+      background: white;
+      color: #5f6368;
+      border: 1px solid #dadce0;
+    }
+    
+    #cancelBtn:hover {
+      background: #f8f9fa;
+    }
+  </style>
+</head>
+<body>
+  <h2>📧 Generuj raport dla partnera</h2>
+  <p class="subtitle">Wypełnij poniższe pola i wygeneruj raport do wysyłki</p>
+  
+  <div class="field-group">
+    <label>Email odbiorcy *</label>
+    <input type="email" id="emailTo" placeholder="partner@example.com" required>
+  </div>
+  
+  <div class="field-group">
+    <label>FBE - próg pokrycia magazynu</label>
+    <input type="text" id="fbeThreshold" value="nie wystarczy na pokrycie sprzedaży w tym miesiącu">
+  </div>
+  
+  <div class="field-group">
+    <label>FBE - minimalna Suma 3M</label>
+    <input type="number" id="fbeMinSum3m" value="5" min="0">
+  </div>
+  
+  <div class="field-group">
+    <label>KZ - minimalna Suma 3M (nowe produkty)</label>
+    <input type="number" id="kzMinSum3m" value="3" min="0">
+  </div>
+  
+  <div class="buttons">
+    <button id="generateBtn" onclick="generate()">Generuj i wyślij</button>
+    <button id="cancelBtn" onclick="google.script.host.close()">Anuluj</button>
+  </div>
+  
+  <script>
+    function generate() {
+      const emailTo = document.getElementById('emailTo').value.trim();
+      
+      if (!emailTo) {
+        alert('Podaj adres email odbiorcy');
+        return;
+      }
+      
+      const params = {
+        emailTo: emailTo,
+        includeFBE: true,
+        fbeThreshold: document.getElementById('fbeThreshold').value,
+        fbeMinSum3m: Number(document.getElementById('fbeMinSum3m').value) || 0,
+        includeKZ: true,
+        kzMinSum3m: Number(document.getElementById('kzMinSum3m').value) || 0,
+        outputFormat: 'email'
+      };
+      
+      document.getElementById('generateBtn').disabled = true;
+      document.getElementById('generateBtn').textContent = 'Wysyłam...';
+      
+      google.script.run
+        .withSuccessHandler(() => {
+          alert('✅ Raport został wysłany!');
+          google.script.host.close();
+        })
+        .withFailureHandler(err => {
+          alert('❌ Błąd: ' + err);
+          document.getElementById('generateBtn').disabled = false;
+          document.getElementById('generateBtn').textContent = 'Generuj i wyślij';
+        })
+        .generujRaportPartnera(params);
+    }
+  </script>
+</body>
+</html>
