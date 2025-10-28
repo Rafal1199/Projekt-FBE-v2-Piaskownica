@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Measure headers</title>
+    <style>
+      /* okienko jest malutkie, nic nie pokazujemy */
+      body { margin: 0; }
+    </style>
+  </head>
+  <body>
+    <script>
+      (function () {
+        // payload został wstrzyknięty z GS jako STRING JSON
+        // w GS: t.payload = JSON.stringify(payload)
+        // tutaj go normalnie parsujemy:
+        const sheets = JSON.parse(<?!= payload ?>); // [{name, headers:[]}, ...]
+
+        // Pomiar szerokości tekstu: Arial 10, pogrubienie
+        const ctx = document.createElement('canvas').getContext('2d');
+        // 10 pt ≈ 13.33 px — ale najważniejsze: bold + Arial.
+        ctx.font = 'bold 10pt Arial';
+
+        // minimalna i maksymalna szerokość kolumn (px)
+        const MIN_W = 60;
+        const MAX_W = 420;
+        // marginesy po lewej/prawej + ikony filtra itp.
+        const PADDING = 24; // możesz skorygować, jeśli chcesz ciaśniej/luźniej
+
+        function textWidthPx(s) {
+          const m = ctx.measureText(String(s || ''));
+          // width + leciutka „nadwyżka” na antyaliasing
+          return Math.ceil(m.width + PADDING);
+        }
+
+        const result = {};
+        sheets.forEach(sh => {
+          const widths = (sh.headers || []).map(h => {
+            const w = textWidthPx(h);
+            return Math.max(MIN_W, Math.min(MAX_W, w));
+          });
+          result[sh.name] = widths;
+        });
+
+        // Odesłanie wyniku do Apps Script i zamknięcie okna
+        google.script.run
+          .withSuccessHandler(function () { google.script.host.close(); })
+          .withFailureHandler(function (err) {
+            alert('Pomiar nagłówków nie powiódł się: ' + (err && err.message || err));
+            google.script.host.close();
+          })
+          .applyMeasuredHeaderWidths_(result);
+      })();
+    </script>
+  </body>
+</html>
