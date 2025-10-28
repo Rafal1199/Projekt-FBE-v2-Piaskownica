@@ -299,13 +299,37 @@ function computeTrendsFromSalesPeriodsRegular(mult1, mult2, mult3) {
   const baseCols = out[0].length;
   const lastRowExisting = Math.max(2, outSh.getLastRow(), out.length);
   
-  outSh.getRange(1, 1, lastRowExisting, baseCols).clearContent();
   outSh.getRange(1, 1, out.length, baseCols).setValues(out);
   outSh.setFrozenRows(1);
 
+  // ✅ FIX: Dodaj formatowanie nagłówków ZARAZ PO setValues
+  try {
+    const LIGHT_GREEN = '#b7e1cd';
+    const hdrRng = outSh.getRange(1, 1, 1, baseCols);
+    
+    hdrRng
+      .setFontFamily('Arial')
+      .setFontSize(10)
+      .setFontWeight('bold')
+      .setHorizontalAlignment('center')
+      .setVerticalAlignment('middle');
+    
+    // Ustaw zielone tło dla wszystkich nagłówków
+    const backgrounds = [];
+    for (let i = 0; i < baseCols; i++) {
+      backgrounds.push(LIGHT_GREEN);
+    }
+    hdrRng.setBackgrounds([backgrounds]);
+    
+      Logger.log('Trendy_KZ: Formatowanie nagłówków zastosowane dla ' + baseCols + ' kolumn');
+    } catch (e) {
+      Logger.log('Błąd formatowania nagłówków Trendy_KZ: ' + (e && (e.stack || e.message) || e));
+    }
+
   // ✅ Dopasowanie szerokości kolumn
   try {
-    applyDefaultHeaderWidths_(outSh, out[0]);
+    applyDefaultHeaderWidths_(outSh, outHeader);  // ← ZMIENIONO: out[0] → outHeader
+    Logger.log('Trendy_KZ: Szerokości kolumn ustawione dla ' + baseCols + ' kolumn');
   } catch (e) {
     Logger.log('Błąd dopasowania szerokości KZ: ' + (e && (e.message || e)));
   }
