@@ -1,0 +1,223 @@
+/**
+ * Ceny_miesięczne_KZ.gs
+ * Buduje arkusz: "Ceny_miesięczne_KZ"
+ * Zakres: od 01-2025 do miesiąca bieżącego (kolumny w formacie MM-YYYY)
+ * Filtr statusów: 1,2,3,4 (pomija 0 i 5)
+ * Źródło: aktywny partner → plik z kol. D arkusza "Partnerzy" (getSS_Ro_()), zakładka "Zamówienia"
+ * Kolumny w źródle:
+ *  - J = status (fallback, jeśli nie znajdziemy po nagłówku)
+ *  - M = products (fallback, jeśli nie znajdziemy po nagłówku)
+ * Notatki: "cena×ilość, cena×ilość, ..."
+ */
+
+const KZ_REG_CFG = {
+  OUT_SHEET: 'Ceny_miesięczne_KZ',
+  SRC_SHEET: 'Zamówienia',
+  START_YEAR: 2025,
+  START_MONTH: 1,
+  FALLBACK_COL_STATUS_1B: 10, // J
+  FALLBACK_COL_PRODUCTS_1B: 13 // M
+};
+
+const ALLOWED_ORDER_STATUSES_KZ = (typeof ALLOWED_ORDER_STATUSES_REG !== 'undefined'
+  ? ALLOWED_ORDER_STATUSES_REG
+  : new Set([1, 2, 3, 4]));
+
+function cmd_przeliczSrednieCenyMiesieczneKZ() {
+  const ui = SpreadsheetApp.getUi();
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(8000)) { ui.alert('Program jest zajęty. Spróbuj za chwilę.'); return; }
+
+  try {
+    ensureAuthWithPartner_();
+    requireActivePartner_();
+    SpreadsheetApp.getActive().toast('Liczenie średnich cen (konto zwykłe)…', 'Programy', 5);
+    buildMonthlyPrices_REG_();
+    SpreadsheetApp.getActive().toast('Ceny miesięczne (konto zwykłe) gotowe ✅', 'Programy', 5);
+  } catch (e) {
+    ui.alert('Błąd liczenia cen (konto zwykłe):\n' + (e && (e.stack || e.message) || e));
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function buildMonthlyPrices_REG_() {
+  const t0 = new Date();
+  const home = getHome_();
+
+  const srcSS = getSS_Ro_();
+  if (!srcSS) throw new Error('Brak URL (kol. D) dla aktywnego partnera w „Partnerzy”.');
+  const sh = srcSS.getSheetByName(KZ_REG_CFG.SRC_SHEET);
+  if (!sh) throw new Error('W źródle brak zakładki "' + KZ_REG_CFG.SRC_SHEET + '".');
+
+  const vals = withRetry_(() => sh.getDataRange().getDisplayValues(), 'getDisplayValues');
+  if (vals.length < 2) throw new Error('Źródło nie zawiera danych.');
+
+  const header = vals[0].map(h => String(h || '').trim().toLowerCase());
+  const idxStatus = (function() {
+    const i = findCol_(header, ['status', 'order_status', 'status zamówienia', 'status_zamowienia']);
+    return (i !== -1 ? i : (KZ_REG_CFG.FALLBACK_COL_STATUS_1B - 1));
+  })();
+  const idxProducts = (function() {
+    const i = findCol_(header, ['products']);
+    return (i !== -1 ? i : (KZ_REG_CFG.FALLBACK_COL_PRODUCTS_1B - 1));
+  })();
+  const idxDate = (function() {
+    const i = findCol_(header, ['created', 'order_date', 'created_at', 'data zamówienia', 'data_zamowienia']);
+    return (i !== -1 ? i : 4); // fallback E (0-based)
+  })();
+
+  const months = monthRange_(KZ_REG_CFG.START_YEAR, KZ_REG_CFG.START_MONTH, new Date());
+  const monthIndex = new Map(months.map((m, i) => [m.key, i]));
+
+  const agg = new Map(); // key -> { sum:number[], qty:number[], notes:string[][] }
+  let srcRows = vals.length - 1;
+  let kept = 0, droppedStatus = 0, droppedDate = 0, droppedRange = 0, droppedItems = 0;
+
+  for (let r = 1; r < vals.length; r++) {
+    const row = vals[r];
+
+    const st = normalizeStatus__price_(row[idxStatus]);
+    const pass = (st !== null) && ALLOWED_ORDER_STATUSES_KZ.has(st);
+    if (!pass) { droppedStatus++; continue; }
+
+    const d = normalizeDate_(row[idxDate]);
+    if (!d) { droppedDate++; continue; }
+    const mi = monthIndex.get(yyyymmKey_(d));
+    if (mi === undefined) { droppedRange++; continue; }
+
+    const items = extractItemsWithPrice__price_(row[idxProducts]);
+    if (!items.length) { droppedItems++; continue; }
+
+    for (const it of items) {
+      const partKey = (it.part_number_key || '').trim();
+      if (!partKey) continue;
+      const qty = Math.max(0, Number(it.quantity || 0)) || 0;
+      const price = Number(String(it.sale_price || '').replace(',', '.'));
+      if (!isFinite(price) || qty <= 0) continue;
+
+      if (!agg.has(partKey)) {
+        agg.set(partKey, {
+          sum: Array(months.length).fill(0),
+          qty: Array(months.length).fill(0),
+          notes: Array(months.length).fill(null).map(_ => [])
+        });
+      }
+      const rec = agg.get(partKey);
+      rec.sum[mi] += price * qty;
+      rec.qty[mi] += qty;
+      rec.notes[mi].push(formatPrice_(price) + '×' + qty);
+      kept++;
+    }
+  }
+
+  const out = [];
+  out.push(['part_number_key', ...months.map(m => m.label)]);
+  const notesByRow = [];
+
+  for (const [key, rec] of agg) {
+    const rowVals = [key];
+    const rowNotes = [];
+    for (let i = 0; i < months.length; i++) {
+      if (rec.qty[i] > 0) {
+        const avg = rec.sum[i] / rec.qty[i];
+        rowVals.push(avg);
+        rowNotes.push(rec.notes[i].join(', '));
+      } else {
+        rowVals.push('');
+        rowNotes.push('');
+      }
+    }
+    out.push(rowVals);
+    notesByRow.push(rowNotes);
+  }
+
+  const outSh = home.getSheetByName(KZ_REG_CFG.OUT_SHEET) || home.insertSheet(KZ_REG_CFG.OUT_SHEET);
+  outSh.clearContents();
+
+  if (out.length > 1) {
+    setValuesChunked_(outSh, 1, 1, out, 20000);
+    outSh.setFrozenRows(1);
+
+    const nRows = out.length - 1;
+    const nCols = months.length;
+    const noteRange = outSh.getRange(2, 2, nRows, nCols);
+    const notesGrid = notesByRow.map(arr => arr.map(s => String(s || '')));
+    noteRange.setNotes(notesGrid);
+  } else {
+    outSh.getRange(1, 1).setValue('part_number_key');
+    if (months.length) outSh.getRange(1, 2, 1, months.length).setValues([months.map(m => m.label)]);
+    outSh.setFrozenRows(1);
+  }
+
+  const secs = ((new Date() - t0) / 1000).toFixed(2);
+  toast_(
+    `${KZ_REG_CFG.OUT_SHEET} — podsumowanie:\n\n` +
+    `Źródłowych wierszy: ${srcRows}\n` +
+    `Zachowanych pozycji (po rozbiciu products): ${kept}\n` +
+    `Odrzucone: status=${droppedStatus}, brak daty=${droppedDate}, poza zakresem=${droppedRange}, brak items=${droppedItems}\n` +
+    `PNK w wyniku: ${agg.size}\n` +
+    `Czas: ${secs}s`,
+    'Programy', 8
+  );
+}
+
+/** Wspólne helpery lokalne */
+function formatPrice_(x) {
+  const n = Number(x);
+  if (!isFinite(n)) return '';
+  return (Math.round(n * 100) / 100).toFixed(2);
+}
+// ===== brakujące helpy dla KZ (status + parsowanie products) =====
+function normalizeStatus__price_(v) {
+  if (v == null || v === '') return null;
+  if (v instanceof Date) {
+    const msPerDay = 86400000;
+    const epoch = Date.UTC(1899,11,30);
+    const serial = Math.round((Date.UTC(v.getFullYear(),v.getMonth(),v.getDate()) - epoch) / msPerDay);
+    return Number.isFinite(serial) ? serial : null;
+  }
+  if (typeof v === 'number' && isFinite(v)) return Math.trunc(v);
+  const s = String(v).trim();
+  const m = s.match(/-?\d+/);
+  if (!m) return null;
+  return Math.trunc(Number(m[0]));
+}
+
+function extractItemsWithPrice__price_(cell) {
+  const out = [];
+  if (cell == null) return out;
+
+  if (Array.isArray(cell)) { for (const it of cell) pushItemWithPrice__price_(it, out); return out; }
+  if (typeof cell === 'object') { pushItemWithPrice__price_(cell, out); return out; }
+
+  const s0 = String(cell).trim();
+  if (!s0) return out;
+
+  // spróbuj pseudo-JSON (zamień ' → ")
+  const sJson = s0.replace(/'/g, '"');
+  try {
+    const obj = JSON.parse(sJson);
+    if (Array.isArray(obj)) { for (const it of obj) pushItemWithPrice__price_(it, out); }
+    else pushItemWithPrice__price_(obj, out);
+    if (out.length) return out;
+  } catch(_) {}
+
+  // fallback: regex (part_number_key + sale_price + qty)
+  const re = /part[_ ]?number[_ ]?key['"]?\s*[:=]\s*['"]([^'"]+)['"][\s\S]*?sale[_ ]?price['"]?\s*[:=]\s*['"]([^'"]+)['"][\s\S]*?(?:initial_qty|quantity|qty)['"]?\s*[:=]\s*(\d+)/gi;
+  let m;
+  while ((m = re.exec(s0)) !== null) {
+    out.push({ part_number_key: m[1], sale_price: m[2], quantity: Number(m[3]) || 1 });
+  }
+  return out;
+}
+
+function pushItemWithPrice__price_(o, out) {
+  if (!o) return;
+  const partKey = (o.part_number_key != null) ? String(o.part_number_key).trim() : '';
+  if (!partKey) return;
+  const qty = Number(o.initial_qty ?? o.quantity ?? o.qty ?? 1) || 1;
+  const price = (o.sale_price != null) ? String(o.sale_price) : '';
+  out.push({ part_number_key: partKey, sale_price: price, quantity: qty });
+}
+
