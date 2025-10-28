@@ -1,0 +1,87 @@
+<script>
+  const MAX = 10;
+
+  function renderOptions(headers){
+    const container = document.getElementById('rows');
+    container.innerHTML = '';
+    addRow(headers);
+  }
+
+  function addRow(headers){
+    const container = document.getElementById('rows');
+    const idx = container.children.length;
+    if (idx >= MAX) return;
+
+    const div = document.createElement('div');
+    div.style.display = 'flex';
+    div.style.gap = '8px';
+    div.style.margin = '4px 0';
+
+    const sel = document.createElement('select');
+    sel.style.flex = '1 1 auto';
+    headers.forEach(h => {
+      const opt = document.createElement('option');
+      opt.value = h;
+      opt.textContent = h;
+      sel.appendChild(opt);
+    });
+
+    const plus = document.createElement('button');
+    plus.type = 'button';
+    plus.textContent = '+ Dodaj';
+    plus.onclick = () => addRow(headers);
+
+    const minus = document.createElement('button');
+    minus.type = 'button';
+    minus.textContent = '– Usuń';
+    minus.onclick = () => { container.removeChild(div); };
+
+    div.appendChild(sel);
+    div.appendChild(plus);
+    div.appendChild(minus);
+    container.appendChild(div);
+  }
+
+  function apply(){
+    const selects = Array.from(document.querySelectorAll('#rows select'));
+    const headers = selects.map(s => s.value).filter(Boolean);
+    // 1. Zablokuj przycisk
+    const btn = document.getElementById('applyBtn');
+    btn.disabled = true;
+    btn.textContent = 'Dodaję...';
+    btn.style.opacity = '0.6';
+    btn.style.cursor = 'not-allowed';
+
+    // 2. Pokaż spinner
+    document.getElementById('spinner').style.display = 'inline-block';
+    google.script.run
+      .withSuccessHandler(() => google.script.host.close())
+      .withFailureHandler(err => alert('Błąd: ' + (err && (err.message || err))))
+      .applySelectedAdsKzColumns(headers);
+  }
+
+  function cancel(){ google.script.host.close(); }
+
+  window.addEventListener('load', () => {
+    const rows = document.getElementById('rows');
+    rows.textContent = 'Ładuję kolumny…';
+    google.script.run
+      .withSuccessHandler(renderOptions)
+      .withFailureHandler(err => {
+        rows.textContent = 'Nie udało się pobrać nagłówków z ADS_KZ.';
+        alert('Błąd pobierania nagłówków: ' + (err && (err.message || err)));
+      })
+      .getAdsKzHeadersForPicker();
+  });
+</script>
+
+<div style="font: 13px Arial, sans-serif;">
+  <h2 style="margin:0 0 10px;">Dodaj własne kolumny z ADS_KZ</h2>
+  <div id="rows" style="margin:8px 0;"></div>
+  <div style="color:#666; font-size:12px; margin:6px 0;">maks. 10 pozycji</div>
+  <div style="display:flex; gap:8px; align-items:center;">
+    <button type="button" id="applyBtn" onclick="apply()">Zastosuj</button>
+    <button type="button" onclick="cancel()">Anuluj</button>
+    <div id="spinner" class="spinner"></div>
+  </div>
+</div>
