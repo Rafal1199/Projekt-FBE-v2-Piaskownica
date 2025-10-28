@@ -1,0 +1,897 @@
+/**
+ * Trendy_konto_zwykłe.js - KOMPLETNA PRZEBUDOWA (zgodnie z Trendy_FBE)
+ * 
+ * NOWE KOLUMNY:
+ * A-D:  part_number_key, ID, SKU, EAN
+ * E-H:  Sprzedaż M-3, M-2, M-1, M0
+ * I-K:  Trendy % (M0/M-1, M-1/M-2, M-2/M-3)
+ * L-O:  Suma 3M/6M, Średnie
+ * P:    Slope_6M
+ * Q:    Klasyfikacja (▲/▼/▶)
+ * R:    Performance
+ * S-U:  Prognozy z 3 mnożnikami
+ * V-X:  Stock, Cena netto/brutto
+ * Y:    Pokrycie_magazynu (tekstowy)
+ * Z:    Obrót_3M_netto
+ * AA:   Udział_w_obrócie_%
+ * AB:   Rotacja_magazynu
+ * AC+:  Custom kolumny z ADS_KZ
+ */
+
+// ===== KONFIGURACJA =====
+const KZ_CFG = {
+  IN_SHEET: 'Sprzedaż_okresowa_KZ',
+  OUT_SHEET: 'Trendy_KZ',
+  ADS_SHEET: 'ADS_KZ',
+  
+  // Parametry trendów
+  TREND_WINDOW: 6,
+  MA3_WINDOW: 3,
+  MA6_WINDOW: 6,
+  EXCLUDE_CURRENT: false,
+  
+  // Skalowanie bieżącego miesiąca (jeśli niepełny)
+  PROPORTIONAL_MIN_DAY: 10,
+  PROPORTIONAL_CAP: 1.6,
+  PROPORTIONAL_MIN_UNITS: 0,
+  
+  // VAT rumuński
+  VAT_RATE: 0.21,
+  
+  // Custom kolumny
+  CUSTOM_COL_PREFIX: 'ADS_KZ: ',
+  CUSTOM_COL_MAX: 10
+};
+
+// ===== MENU POPUP - 3 mnożniki =====
+function cmd_computeTrendsRegularPrompt() {
+  try {
+    ensureAuthWithPartner_();
+    requireActivePartner_();
+  } catch (e) {
+    SpreadsheetApp.getUi().alert('Błąd autoryzacji/partnera:\n' + (e && (e.message || e)));
+    return;
+  }
+  
+  const t = HtmlService.createTemplateFromFile('TrendMultipliersPromptKZ');
+  const html = t.evaluate().setWidth(480).setHeight(520);
+  SpreadsheetApp.getUi().showModalDialog(html, 'Mnożniki dla prognoz (Konto Zwykłe)');
+}
+
+function computeTrendsRegularWithMultipliers(mult1, mult2, mult3) {
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(8000)) {
+    throw new Error('Program jest zajęty. Spróbuj za chwilę.');
+  }
+  
+  try {
+    ensureAuthWithPartner_();
+    requireActivePartner_();
+    SpreadsheetApp.getActive().toast('Liczenie trendów (konto zwykłe) z mnożnikami…', 'Programy', 5);
+    computeTrendsFromSalesPeriodsRegular(mult1, mult2, mult3);
+    SpreadsheetApp.getActive().toast('Trendy (konto zwykłe) gotowe ✅', 'Programy', 5);
+  } catch (e) {
+    throw new Error('Błąd trendów (konto zwykłe):\n' + (e && (e.stack || e.message) || e));
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function computeTrendsFromSalesPeriodsRegular(mult1, mult2, mult3) {
+  // Domyślnie 0% jeśli nie podano
+  mult1 = Number(mult1) || 0;
+  mult2 = Number(mult2) || 0;
+  mult3 = Number(mult3) || 0;
+
+  requireActivePartner_();
+
+  const ss = SpreadsheetApp.getActive();
+  const inSh = ss.getSheetByName(KZ_CFG.IN_SHEET);
+  if (!inSh) throw new Error(`Brak arkusza "${KZ_CFG.IN_SHEET}"`);
+
+  const lr = inSh.getLastRow(), lc = inSh.getLastColumn();
+  if (lr < 2) throw new Error('Brak danych do trendów (konto zwykłe).');
+
+  const vals = inSh.getRange(1, 1, lr, lc).getValues();
+  const hdrDisp = inSh.getRange(1, 1, 1, lc).getDisplayValues()[0];
+  const monthCols = getMonthColumnsKZ_(hdrDisp);
+  if (!monthCols.length) throw new Error('Nie znaleziono kolumn miesięcznych (konto zwykłe).');
+
+  const today = new Date(), nowY = today.getFullYear(), nowM = today.getMonth() + 1;
+  const lastIdx = monthCols.length - 1;
+  let useLast = KZ_CFG.EXCLUDE_CURRENT ? lastIdx - 1 : lastIdx;
+  const lastIsCurrent = (monthCols[lastIdx].y === nowY && monthCols[lastIdx].m === nowM);
+
+  let scaleCurrent = false, scaleFactor = 1;
+  if (lastIsCurrent) {
+    const day = today.getDate();
+    if (day < KZ_CFG.PROPORTIONAL_MIN_DAY) useLast = lastIdx - 1;
+    else {
+      const proporcja = daysInMonthKZ_(nowY, nowM) / Math.max(1, day);
+      scaleFactor = Math.min(KZ_CFG.PROPORTIONAL_CAP, proporcja);
+      scaleCurrent = true;
+    }
+  }
+  if (useLast < 0) throw new Error('Za mało miesięcy po odjęciu bieżącego.');
+
+  // Wczytaj metryki z ADS_KZ
+  const adsKzMetrics = readAdsKzMetrics_();
+  
+  // Wczytaj dane produktowe (ID/SKU/EAN)
+  const productInfoMap = readPartnerProductDataKZ_();
+
+  // Dynamiczne nagłówki dla prognoz
+  const formatMultiplier = (m) => {
+    if (m === 0) return '';
+    const sign = m > 0 ? '+' : '';
+    return ` [${sign}${m}%]`;
+  };
+
+  const outHeader = [
+    'part_number_key', 'ID', 'SKU', 'EAN',
+    '3 miesiące wstecz', 'Sprzedaż dwa miesiące wstecz', 'Sprzedaż ubiegły miesiąc', 'Sprzedaż w obecnym miesiącu',
+    'Trend_M0/M-1_%', 'Trend_M-1/M-2_%', 'Trend_M-2/M-3_%',
+    'Suma_3M', 'Średnia_3M', 'Suma_6M', 'Średnia_6M', 'Slope_6M', 'Klasyfikacja',
+    'Performance',
+    `Prognoza_nast_M${formatMultiplier(mult1)}`,
+    `Prognoza_+2M${formatMultiplier(mult2)}`,
+    `Prognoza_+3M${formatMultiplier(mult3)}`,
+    'Stock', 'Cena_netto', 'Cena_brutto', 'Pokrycie_magazynu',
+    'Obrót_3M_netto', 'Udział_w_obrócie_%', 'Rotacja_magazynu'
+  ];
+
+  // Pierwsza pętla: zbierz dane + oblicz obroty
+  const rowsData = [];
+  let totalRevenue = 0;
+
+  for (let r = 1; r < vals.length; r++) {
+    const key = String(vals[r][0] || '').trim();
+    if (!key) continue;
+
+    const series = monthCols.map(mc => toNumKZ_(vals[r][mc.colIdx0]));
+
+    if (lastIsCurrent && scaleCurrent) {
+      const lastVal0 = series[series.length - 1] || 0;
+      series[series.length - 1] = Math.max(KZ_CFG.PROPORTIONAL_MIN_UNITS, Math.round(lastVal0 * scaleFactor));
+    }
+
+    const salesPrev3 = (useLast > 2 ? series[useLast - 3] || 0 : '');
+    const salesPrev2 = (useLast > 1 ? series[useLast - 2] || 0 : '');
+    const salesPrev1 = (useLast > 0 ? series[useLast - 1] || 0 : '');
+    const salesCurrent = series[useLast] || 0;
+
+    const trendM0M1 = (salesPrev1 > 0 ? ((salesCurrent - salesPrev1) / salesPrev1) * 100 : (salesCurrent > 0 ? 100 : ''));
+    const trendM1M2 = (salesPrev2 > 0 ? ((salesPrev1 - salesPrev2) / salesPrev2) * 100 : (salesPrev1 > 0 ? 100 : ''));
+    const trendM2M3 = (salesPrev3 > 0 ? ((salesPrev2 - salesPrev3) / salesPrev3) * 100 : (salesPrev2 > 0 ? 100 : ''));
+
+    const sum3 = sumTailKZ_(series, useLast, KZ_CFG.MA3_WINDOW);
+    const avg3 = avgFromSumKZ_(sum3, Math.min(KZ_CFG.MA3_WINDOW, useLast + 1));
+    const sum6 = sumTailKZ_(series, useLast, KZ_CFG.MA6_WINDOW);
+    const avg6 = avgFromSumKZ_(sum6, Math.min(KZ_CFG.MA6_WINDOW, useLast + 1));
+    const slope = linregKZ_(tailWindowKZ_(series, useLast, KZ_CFG.MA6_WINDOW)).slope;
+
+    const cls = (slope > 0.5 ? '▲ rośnie' : (slope < -0.5 ? '▼ spada' : '▶ stabilny'));
+
+    // Prognozy bazowe + mnożniki
+    const fc1_base = Math.max(0, Math.round(avg3 + 1 * slope));
+    const fc2_base = Math.max(0, Math.round(avg3 + 2 * slope));
+    const fc3_base = Math.max(0, Math.round(avg3 + 3 * slope));
+    const fc1 = Math.round(fc1_base * (1 + mult1 / 100));
+    const fc2 = Math.round(fc2_base * (1 + mult2 / 100));
+    const fc3 = Math.round(fc3_base * (1 + mult3 / 100));
+
+    // Metryki z ADS_KZ
+    const metrics = adsKzMetrics.get(key) || null;
+    const stock = metrics && metrics.stock != null ? metrics.stock : 0;
+    const priceNet = metrics && metrics.priceNet != null ? metrics.priceNet : null;
+    const priceGross = priceNet == null ? '' : roundKZ_(priceNet * (1 + KZ_CFG.VAT_RATE), 2);
+    const performance = metrics && metrics.performance != null ? metrics.performance : '';
+
+    // Pokrycie magazynu (symulacja)
+    let coverageMsg = '';
+    if (stock !== '' && isFinite(stock)) {
+      let remaining = stock, coverMonths = 0;
+      if (remaining >= fc1) { remaining -= fc1; coverMonths = 1; }
+      else { coverMonths = (fc1 > 0 ? 0 : 1); }
+      if (coverMonths >= 1) {
+        if (remaining >= fc2) { remaining -= fc2; coverMonths = 2; }
+        else if (fc2 === 0) { coverMonths = 2; }
+      }
+      if (coverMonths >= 2) {
+        if (remaining >= fc3) { remaining -= fc3; coverMonths = 3; }
+        else if (fc3 === 0) { coverMonths = 3; }
+      }
+      if (coverMonths >= 3) coverageMsg = 'wystarczy na 3 miesiące lub więcej';
+      else if (coverMonths === 2) coverageMsg = 'wystarczy na pokrycie sprzedaży na dwa miesiące';
+      else if (coverMonths === 1) coverageMsg = 'wystarczy na jeden miesiąc';
+      else coverageMsg = 'nie wystarczy na pokrycie sprzedaży w tym miesiącu';
+    }
+
+    // Obrót i rotacja
+    const revenue = (priceNet != null && sum3 > 0) ? roundKZ_(priceNet * sum3, 2) : '';
+    const rotation = (stock !== '' && avg3 > 0) ? roundKZ_(stock / avg3, 2) : '';
+
+    if (revenue !== '') totalRevenue += revenue;
+
+    // Dane produktowe (ID/SKU/EAN)
+    const info = lookupProductInfoKZ_(productInfoMap, key);
+
+    rowsData.push({
+      key,
+      id: info ? info.id : '',
+      sku: info ? info.sku : '',
+      ean: info ? info.ean : '',
+      salesPrev3,
+      salesPrev2,
+      salesPrev1,
+      salesCurrent,
+      trendM0M1,
+      trendM1M2,
+      trendM2M3,
+      sum3,
+      avg3,
+      sum6,
+      avg6,
+      slope,
+      cls,
+      performance,
+      fc1,
+      fc2,
+      fc3,
+      stock,
+      priceNet,
+      priceGross,
+      coverageMsg,
+      revenue,
+      rotation
+    });
+  }
+
+  // ✅ SORTOWANIE: posortuj rowsData po revenue (malejąco) PRZED budowaniem out
+  rowsData.sort((a, b) => {
+    const revA = (a.revenue !== '' && isFinite(a.revenue)) ? a.revenue : 0;
+    const revB = (b.revenue !== '' && isFinite(b.revenue)) ? b.revenue : 0;
+    return revB - revA; // najwyższy obrót na górze
+  });
+
+  // ✅ Buduj tablicę out z POSORTOWANYCH danych
+  const out = [outHeader];
+  
+  for (const row of rowsData) {
+    const revenueShare = (row.revenue !== '' && totalRevenue > 0) ? roundKZ_((row.revenue / totalRevenue) * 100, 2) : '';
+
+    out.push([
+      row.key,
+      row.id,
+      row.sku,
+      row.ean,
+      row.salesPrev3,
+      row.salesPrev2,
+      row.salesPrev1,
+      row.salesCurrent,
+      isNumKZ_(row.trendM0M1) ? roundKZ_(row.trendM0M1, 1) : row.trendM0M1,
+      isNumKZ_(row.trendM1M2) ? roundKZ_(row.trendM1M2, 1) : row.trendM1M2,
+      isNumKZ_(row.trendM2M3) ? roundKZ_(row.trendM2M3, 1) : row.trendM2M3,
+      row.sum3,
+      roundKZ_(row.avg3, 2),
+      row.sum6,
+      roundKZ_(row.avg6, 2),
+      roundKZ_(row.slope, 3),
+      row.cls,
+      row.performance,
+      row.fc1,
+      row.fc2,
+      row.fc3,
+      row.stock,
+      row.priceNet == null ? '' : row.priceNet,
+      row.priceGross,
+      row.coverageMsg,
+      row.revenue,
+      revenueShare,
+      row.rotation
+    ]);
+  }
+
+  // Zapis do arkusza
+  let outSh = ss.getSheetByName(KZ_CFG.OUT_SHEET) || ss.insertSheet(KZ_CFG.OUT_SHEET);
+  outSh.clearContents();
+  
+  const baseCols = out[0].length;
+  const lastRowExisting = Math.max(2, outSh.getLastRow(), out.length);
+  
+  outSh.getRange(1, 1, lastRowExisting, baseCols).clearContent();
+  outSh.getRange(1, 1, out.length, baseCols).setValues(out);
+  outSh.setFrozenRows(1);
+
+  // ✅ Dopasowanie szerokości kolumn
+  try {
+    applyDefaultHeaderWidths_(outSh, out[0]);
+  } catch (e) {
+    Logger.log('Błąd dopasowania szerokości KZ: ' + (e && (e.message || e)));
+  }
+
+  // Formatowanie warunkowe dla Pokrycie_magazynu
+  try {
+    ensureCoverageFormattingKZ_(outSh);
+    SpreadsheetApp.flush();
+  } catch (e) {
+    Logger.log('ensureCoverageFormattingKZ_ failed: ' + (e && (e.stack || e.message) || e));
+  }
+
+  // Kolorowanie produktów z Suma_3M ≤ 1
+  try {
+    flagLow3mOnTrendyKZ_(outSh);
+  } catch (e) {
+    Logger.log('flagLow3mOnTrendyKZ_ skipped: ' + e);
+  }
+
+  // Kolorowanie duplikatów (produkt na FBE)
+  try {
+    highlightDuplicatesOnFBE_(outSh);
+  } catch (e) {
+    Logger.log('highlightDuplicatesOnFBE_ failed: ' + (e && (e.stack || e.message) || e));
+  }
+
+  SpreadsheetApp.flush();
+}
+
+// ===== WCZYTYWANIE DANYCH Z ADS_KZ =====
+function readAdsKzMetrics_() {
+  const map = new Map();
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName(KZ_CFG.ADS_SHEET);
+  if (!sh) return map;
+
+  const lr = sh.getLastRow();
+  const lc = sh.getLastColumn();
+  if (lr < 2 || lc < 17) return map;
+
+  const width = Math.max(17, Math.min(lc, sh.getMaxColumns ? sh.getMaxColumns() : lc));
+  const vals = sh.getRange(1, 1, lr, width).getValues();
+
+  const IDX_PNK = 3;
+  const IDX_STOCK = 13;
+  const IDX_PRICE_NET = 15;
+  const IDX_PERFORMANCE = 16;
+
+  for (let r = 1; r < vals.length; r++) {
+    const row = vals[r];
+    const key = String(row[IDX_PNK] || '').trim();
+    if (!key) continue;
+
+    const metrics = {};
+
+    const stockNum = Number(String(row[IDX_STOCK] ?? '').replace(',', '.'));
+    metrics.stock = isFinite(stockNum) ? stockNum : 0;
+
+    const priceRaw = row[IDX_PRICE_NET];
+    const priceNum = Number(String(priceRaw ?? '').replace(',', '.'));
+    if (isFinite(priceNum)) metrics.priceNet = priceNum;
+
+    const perfRaw = row[IDX_PERFORMANCE];
+    const perfNum = Number(String(perfRaw ?? '').replace(',', '.'));
+    if (isFinite(perfNum)) {
+      metrics.performance = perfNum;
+    } else {
+      const perfStr = String(perfRaw || '').trim();
+      if (perfStr) metrics.performance = perfStr;
+    }
+
+    if (map.has(key)) {
+      const existing = map.get(key);
+      if (metrics.stock !== undefined) existing.stock = metrics.stock;
+      if (metrics.priceNet !== undefined) existing.priceNet = metrics.priceNet;
+      if (metrics.performance !== undefined) existing.performance = metrics.performance;
+    } else {
+      map.set(key, metrics);
+    }
+  }
+
+  return map;
+}
+
+// ===== WCZYTYWANIE DANYCH PRODUKTOWYCH (ID/SKU/EAN) =====
+/**
+ * Źródło: arkusz "Partnerzy" → kolumna E → plik → arkusz "Dane"
+ * Mapowanie:
+ *  - PNK: kolumna A (klucz)
+ *  - ID: kolumna F (0-based: 5)
+ *  - SKU: kolumna J (0-based: 9)
+ *  - EAN: kolumna AL (0-based: 37)
+ */
+function readPartnerProductDataKZ_() {
+  const map = new Map();
+  
+  try {
+    // 1. Wczytaj URL pliku z arkusza "Partnerzy" (kolumna E)
+    const ss = SpreadsheetApp.getActive();
+    const partnersSh = ss.getSheetByName('Partnerzy');
+    if (!partnersSh) {
+      Logger.log('readPartnerProductDataKZ_: Brak arkusza "Partnerzy"');
+      return map;
+    }
+
+    const activePartnerId = getActivePartnerId_();
+    if (!activePartnerId) {
+      Logger.log('readPartnerProductDataKZ_: Brak aktywnego partnera');
+      return map;
+    }
+
+    const partnersData = partnersSh.getDataRange().getDisplayValues();
+    if (partnersData.length < 2) return map;
+
+    let productFileUrl = null;
+    for (let i = 1; i < partnersData.length; i++) {
+      const id = String(partnersData[i][0] || '').trim(); // kolumna A
+      if (id === activePartnerId) {
+        productFileUrl = String(partnersData[i][4] || '').trim(); // kolumna E (0-based: 4)
+        break;
+      }
+    }
+
+    if (!productFileUrl) {
+      Logger.log('readPartnerProductDataKZ_: Brak URL pliku dla partnera ' + activePartnerId);
+      return map;
+    }
+
+    // 2. Otwórz plik i arkusz "Dane"
+    const productSS = SpreadsheetApp.openByUrl(productFileUrl);
+    const dataSh = productSS.getSheetByName('Dane');
+    if (!dataSh) {
+      Logger.log('readPartnerProductDataKZ_: Brak arkusza "Dane" w pliku produktowym');
+      return map;
+    }
+
+    const lr = dataSh.getLastRow();
+    const lc = dataSh.getLastColumn();
+    if (lr < 2 || lc < 38) {
+      Logger.log('readPartnerProductDataKZ_: Za mało kolumn w "Dane" (min. 38)');
+      return map;
+    }
+
+    // 3. Wczytaj dane (kolumny A, F, J, AL)
+    const width = Math.max(38, Math.min(lc, dataSh.getMaxColumns ? dataSh.getMaxColumns() : lc));
+    const values = dataSh.getRange(2, 1, lr - 1, width).getDisplayValues();
+
+    const IDX_PNK = 0; // kolumna A
+    const IDX_ID = 5;  // kolumna F
+    const IDX_SKU = 9; // kolumna J
+    const IDX_EAN = 37; // kolumna AL
+
+    for (let r = 0; r < values.length; r++) {
+      const row = values[r];
+      const pnk = String(row[IDX_PNK] || '').trim();
+      if (!pnk) continue;
+
+      const id = String(row[IDX_ID] || '').trim();
+      const sku = String(row[IDX_SKU] || '').trim();
+      const ean = String(row[IDX_EAN] || '').trim();
+
+      if (!id && !sku && !ean) continue;
+
+      const info = { id, sku, ean };
+      const norm = normalizeKeyForMapKZ_(pnk);
+      if (norm && !map.has(norm)) {
+        map.set(norm, info);
+      }
+    }
+
+    Logger.log('readPartnerProductDataKZ_: Zmapowano ' + map.size + ' produktów');
+    return map;
+
+  } catch (e) {
+    Logger.log('readPartnerProductDataKZ_ error: ' + (e && (e.stack || e.message) || e));
+    return map;
+  }
+}
+
+function normalizeKeyForMapKZ_(value) {
+  const s = String(value || '').trim();
+  return s ? s.toUpperCase() : '';
+}
+
+function lookupProductInfoKZ_(map, key) {
+  if (!map || typeof map.get !== 'function') return null;
+  const norm = normalizeKeyForMapKZ_(key);
+  if (!norm) return null;
+  return map.get(norm) || null;
+}
+
+// ===== FORMATOWANIE WARUNKOWE DLA POKRYCIE_MAGAZYNU =====
+function ensureCoverageFormattingKZ_(sh) {
+  if (!sh) return;
+  const lastRow = Math.max(2, sh.getLastRow());
+  const hdr = sh.getRange(1, 1, 1, Math.max(1, sh.getLastColumn())).getDisplayValues()[0];
+
+  const cCover = colIndexByHeaderSoftKZ_(hdr, 'Pokrycie_magazynu');
+  if (!cCover) return;
+
+  const rng = sh.getRange(2, cCover, lastRow - 1, 1);
+
+  const rules = sh.getConditionalFormatRules();
+  let keep = rules.filter(rule => !rule.getRanges().some(r =>
+    r.getColumn() <= cCover && cCover < r.getColumn() + r.getNumColumns()
+  ));
+
+  const red = SpreadsheetApp.newConditionalFormatRule()
+    .whenTextEqualTo('nie wystarczy na pokrycie sprzedaży w tym miesiącu')
+    .setBackground('#fde7e9')
+    .setRanges([rng]).build();
+
+  const green1 = SpreadsheetApp.newConditionalFormatRule()
+    .whenTextEqualTo('wystarczy na jeden miesiąc')
+    .setBackground('#e6f4ea')
+    .setRanges([rng]).build();
+
+  const green2 = SpreadsheetApp.newConditionalFormatRule()
+    .whenTextEqualTo('wystarczy na pokrycie sprzedaży na dwa miesiące')
+    .setBackground('#e6f4ea')
+    .setRanges([rng]).build();
+
+  const green3 = SpreadsheetApp.newConditionalFormatRule()
+    .whenTextEqualTo('wystarczy na 3 miesiące lub więcej')
+    .setBackground('#e6f4ea')
+    .setRanges([rng]).build();
+
+  sh.setConditionalFormatRules(keep.concat([red, green1, green2, green3]));
+}
+
+// ===== KOLOROWANIE PNK DLA SUMA_3M ≤ 1 =====
+function flagLow3mOnTrendyKZ_(sh) {
+  if (!sh) return;
+  const vals = sh.getDataRange().getValues();
+  if (vals.length < 2) return;
+
+  const headers = vals[0].map(String);
+
+  const pickCol1 = (cands) => {
+    for (const cand of cands) {
+      const idx1 = colIndexByHeaderSoftKZ_(headers, cand);
+      if (idx1 > 0) return idx1;
+    }
+    return 0;
+  };
+
+  const idxPNK1 = pickCol1(['part_number_key', 'PNK', 'part_number', 'SKU', 'sku']);
+  const idxSuma31 = pickCol1(['Suma_3M', 'Suma 3M', 'SUMA_3M']);
+
+  if (!idxPNK1 || !idxSuma31) return;
+
+  const n = vals.length - 1;
+  const bgs = Array.from({ length: n }, () => ['']);
+
+  for (let r = 1; r < vals.length; r++) {
+    const s3 = Number(vals[r][idxSuma31 - 1]);
+    if (!isNaN(s3) && s3 <= 1) {
+      bgs[r - 1][0] = '#ffdddd';
+    }
+  }
+
+  sh.getRange(2, idxPNK1, n, 1).setBackgrounds(bgs);
+}
+
+// ===== KOLOROWANIE DUPLIKATÓW (PRODUKT JUŻ NA FBE) =====
+function highlightDuplicatesOnFBE_(trendyKzSheet) {
+  if (!trendyKzSheet) return;
+
+  const ss = SpreadsheetApp.getActive();
+  const fbeSheet = ss.getSheetByName('Trendy_FBE');
+  if (!fbeSheet) return;
+
+  const fbeLastRow = fbeSheet.getLastRow();
+  if (fbeLastRow < 2) return;
+
+  const fbeHeader = fbeSheet.getRange(1, 1, 1, fbeSheet.getLastColumn()).getDisplayValues()[0];
+  const idxFbePnk = colIndexByHeaderSoftKZ_(fbeHeader, 'part_number_key');
+  const idxFbeStock = colIndexByHeaderSoftKZ_(fbeHeader, 'Stock');
+
+  if (!idxFbePnk || !idxFbeStock) {
+    Logger.log('highlightDuplicatesOnFBE_: brak kolumn PNK lub Stock w Trendy_FBE');
+    return;
+  }
+
+  const fbeData = fbeSheet.getRange(2, 1, fbeLastRow - 1, Math.max(idxFbePnk, idxFbeStock)).getDisplayValues();
+  const stockMap = new Map();
+
+  for (let i = 0; i < fbeData.length; i++) {
+    const pnk = String(fbeData[i][idxFbePnk - 1] || '').trim();
+    if (!pnk) continue;
+
+    const stockRaw = fbeData[i][idxFbeStock - 1];
+    const stock = Number(String(stockRaw || '').replace(',', '.'));
+    if (isFinite(stock)) {
+      stockMap.set(pnk, stock);
+    }
+  }
+
+  const kzLastRow = trendyKzSheet.getLastRow();
+  if (kzLastRow < 2) return;
+
+  const pnkColumnRange = trendyKzSheet.getRange(2, 1, kzLastRow - 1, 1);
+
+  try {
+    pnkColumnRange.setBackground(null);
+    pnkColumnRange.setBackgroundRGB(255, 255, 255);
+  } catch (e) {
+    Logger.log('Błąd czyszczenia tła: ' + e);
+  }
+
+  const kzPnkValues = pnkColumnRange.getDisplayValues();
+
+  const backgrounds = [];
+  for (let i = 0; i < kzPnkValues.length; i++) {
+    const pnk = String(kzPnkValues[i][0] || '').trim();
+    const stockOnFbe = stockMap.get(pnk) || 0;
+
+    if (stockOnFbe >= 1) {
+      backgrounds.push(['#ffdddd']);
+    } else {
+      backgrounds.push([null]);
+    }
+  }
+
+  if (backgrounds.length > 0) {
+    pnkColumnRange.setBackgrounds(backgrounds);
+  }
+}
+
+// ===== CUSTOM KOLUMNY Z ADS_KZ (PRZESUNIĘCIE O 3 w prawo: AC+) =====
+function cmd_addCustomColumnsRegular() {
+  try {
+    ensureAuthWithPartner_();
+    requireActivePartner_();
+  } catch (e) {
+    SpreadsheetApp.getUi().alert('Błąd autoryzacji/partnera:\n' + (e && (e.message || e)));
+    return;
+  }
+
+  const t = HtmlService.createTemplateFromFile('AddCustomColumnsKZ');
+  const html = t.evaluate().setWidth(520).setHeight(420);
+  SpreadsheetApp.getUi().showModalDialog(html, 'Dodaj własne kolumny z ADS_KZ');
+}
+
+function getAdsKzHeadersForPicker() {
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName(KZ_CFG.ADS_SHEET);
+  if (!sh) throw new Error('Brak arkusza "' + KZ_CFG.ADS_SHEET + '".');
+
+  const lc = sh.getLastColumn();
+  if (lc < 1) return [];
+
+  const hdr = sh.getRange(1, 1, 1, lc).getDisplayValues()[0];
+  return hdr.map(h => String(h || '').trim()).filter(Boolean);
+}
+
+function applySelectedAdsKzColumns(selectedHeaders) {
+  if (!Array.isArray(selectedHeaders)) selectedHeaders = [];
+  const uniq = Array.from(new Set(selectedHeaders.map(s => String(s || '').trim()).filter(Boolean))).slice(0, KZ_CFG.CUSTOM_COL_MAX);
+
+  const ss = SpreadsheetApp.getActive();
+  const outSh = ss.getSheetByName(KZ_CFG.OUT_SHEET);
+  const adsSh = ss.getSheetByName(KZ_CFG.ADS_SHEET);
+  if (!outSh) throw new Error('Brak arkusza "' + KZ_CFG.OUT_SHEET + '".');
+  if (!adsSh) throw new Error('Brak arkusza "' + KZ_CFG.ADS_SHEET + '".');
+
+  const lrO = outSh.getLastRow();
+  if (lrO < 2) throw new Error('Arkusz "' + KZ_CFG.OUT_SHEET + '" jest pusty.');
+
+  // Usuń stare custom kolumny
+  (function removeOldCustom_() {
+    const lc = outSh.getLastColumn();
+    const hdr = outSh.getRange(1, 1, 1, lc).getDisplayValues()[0];
+    const toDelete = [];
+    for (let i = 0; i < hdr.length; i++) {
+      const h = String(hdr[i] || '');
+      if (h.startsWith(KZ_CFG.CUSTOM_COL_PREFIX)) toDelete.push(i + 1);
+    }
+    for (let k = toDelete.length - 1; k >= 0; k--) {
+      try {
+        outSh.deleteColumn(toDelete[k]);
+      } catch (_) {}
+    }
+  })();
+
+  if (!uniq.length) {
+    SpreadsheetApp.getActive().toast('Usunięto poprzednie kolumny ADS_KZ. Nic nie dodano.', 'Programy', 4);
+    return;
+  }
+
+  const lrA = adsSh.getLastRow();
+  const lcA = adsSh.getLastColumn();
+  if (lrA < 2 || lcA < 1) throw new Error('"' + KZ_CFG.ADS_SHEET + '" nie zawiera danych.');
+
+  const hdrA = adsSh.getRange(1, 1, 1, lcA).getDisplayValues()[0].map(x => String(x || '').trim());
+  const idxByHeader = new Map();
+  hdrA.forEach((name, i) => {
+    if (name) idxByHeader.set(name, i);
+  });
+
+  const lowerA = hdrA.map(h => h.toLowerCase());
+  const idxKeyAds0 = (function () {
+    const cands = ['part number key (pnk)', 'pnk', 'part_number_key', 'part number key'];
+    for (const c of cands) {
+      const idx = lowerA.indexOf(c);
+      if (idx !== -1) return idx;
+    }
+    return -1;
+  })();
+  if (idxKeyAds0 === -1) throw new Error('W "' + KZ_CFG.ADS_SHEET + '" nie znaleziono kolumny PNK.');
+
+  const hdrOut = outSh.getRange(1, 1, 1, outSh.getLastColumn()).getDisplayValues()[0];
+  const idxKeyOut1 = colIndexByHeaderSoftKZ_(hdrOut, 'part_number_key');
+  if (!idxKeyOut1) throw new Error('W "' + KZ_CFG.OUT_SHEET + '" nie znaleziono kolumny "part_number_key".');
+
+  const adsVals = adsSh.getRange(2, 1, lrA - 1, lcA).getDisplayValues();
+  const rowByPNK = new Map();
+  for (let r = 0; r < adsVals.length; r++) {
+    const k = String(adsVals[r][idxKeyAds0] || '').trim();
+    if (k && !rowByPNK.has(k)) rowByPNK.set(k, adsVals[r]);
+  }
+
+  const keysOut = outSh.getRange(2, idxKeyOut1, lrO - 1, 1).getDisplayValues().map(r => String(r[0] || '').trim());
+
+  let insertAt = outSh.getLastColumn() + 1;
+  const insertedCols = [];
+
+  uniq.forEach(selHdr => {
+    const colIdx0 = idxByHeader.get(selHdr);
+    if (typeof colIdx0 !== 'number') return;
+
+    if (outSh.getLastColumn() < insertAt) {
+      outSh.insertColumnAfter(outSh.getLastColumn());
+    }
+    const col1 = insertAt;
+    insertAt++;
+
+    const headerCell = outSh.getRange(1, col1);
+    headerCell.setValue(KZ_CFG.CUSTOM_COL_PREFIX + selHdr);
+    try {
+      headerCell.setFontWeight('bold');
+    } catch (_) {}
+
+    const rows = keysOut.length;
+    if (rows > 0) {
+      const dataRng = outSh.getRange(2, col1, rows, 1);
+      neutralizeRangeFormattingKZ_(dataRng);
+      const colData = keysOut.map(key => {
+        const row = rowByPNK.get(key);
+        return [row ? row[colIdx0] : ''];
+      });
+      dataRng.setValues(colData);
+    }
+
+    insertedCols.push(col1);
+  });
+
+  if (!insertedCols.length) {
+    SpreadsheetApp.getActive().toast('Żadna z wybranych kolumn nie została znaleziona w ADS_KZ.', 'Programy', 4);
+    return;
+  }
+
+  try {
+    const rules = outSh.getConditionalFormatRules();
+    const keep = rules.filter(rule => !rule.getRanges().some(r => {
+      const c1 = r.getColumn();
+      const c2 = c1 + r.getNumColumns() - 1;
+      return insertedCols.some(col => c1 <= col && col <= c2);
+    }));
+    outSh.setConditionalFormatRules(keep);
+  } catch (_) {}
+
+  try {
+    ensureBoldHeadersAllSheets_ && ensureBoldHeadersAllSheets_();
+  } catch (_) {}
+
+  SpreadsheetApp.getActive().toast('Dodano kolumny: ' + uniq.join(', '), 'Programy', 5);
+}
+
+function neutralizeRangeFormattingKZ_(rng) {
+  try {
+    rng.clearFormat();
+    rng.clearDataValidations();
+    rng.setFontColor('#000000');
+    rng.setBackground(null);
+    rng.setNumberFormat('@');
+  } catch (_) {}
+}
+
+// ===== HELPERY (LOKALNE) =====
+function getMonthColumnsKZ_(header) {
+  const out = [];
+  for (let c = 0; c < header.length; c++) {
+    const n = normalizeMonthHeaderKZ_(header[c]);
+    if (n) out.push({ label: n.label, colIdx0: c, y: n.y, m: n.m });
+  }
+  out.sort((a, b) => a.y === b.y ? a.m - b.m : a.y - b.y);
+  return out;
+}
+
+function normalizeMonthHeaderKZ_(h) {
+  if (h instanceof Date && !isNaN(h)) {
+    const y = h.getFullYear(), m = h.getMonth() + 1;
+    return { label: `${String(m).padStart(2, '0')}-${y}`, y, m };
+  }
+  let s = String(h || '').trim();
+  if (!s) return null;
+  s = s.replace(/[‐-―−﹘﹣－]/g, '-').replace(/[\/.]/g, '-').replace(/\s+/g, '').replace(/-+/g, '-');
+  let mm, yyyy, M = s.match(/^(\d{2})-(\d{4})$/);
+  if (M) {
+    mm = Number(M[1]);
+    yyyy = Number(M[2]);
+  } else {
+    M = s.match(/^(\d{4})-(\d{2})$/);
+    if (M) {
+      yyyy = Number(M[1]);
+      mm = Number(M[2]);
+    } else return null;
+  }
+  if (!(mm >= 1 && mm <= 12)) return null;
+  return { label: `${String(mm).padStart(2, '0')}-${yyyy}`, y: yyyy, m: mm };
+}
+
+function toNumKZ_(v) {
+  const n = Number(String(v ?? '').replace(',', '.'));
+  return isFinite(n) ? n : 0;
+}
+
+function isNumKZ_(v) {
+  return typeof v === 'number' && isFinite(v);
+}
+
+function roundKZ_(x, p) {
+  const m = Math.pow(10, p || 0);
+  return Math.round((x + Number.EPSILON) * m) / m;
+}
+
+function sumTailKZ_(arr, endIdx, win) {
+  let s = 0;
+  for (let i = Math.max(0, endIdx - win + 1); i <= endIdx; i++) s += toNumKZ_(arr[i]);
+  return s;
+}
+
+function avgFromSumKZ_(sum, cnt) {
+  return cnt > 0 ? sum / cnt : 0;
+}
+
+function tailWindowKZ_(arr, endIdx, win) {
+  const st = Math.max(0, endIdx - win + 1);
+  return arr.slice(st, endIdx + 1).map(toNumKZ_);
+}
+
+function meanKZ_(arr) {
+  if (!arr.length) return 0;
+  let s = 0;
+  for (const v of arr) s += toNumKZ_(v);
+  return s / arr.length;
+}
+
+function linregKZ_(y) {
+  const n = y.length;
+  let sx = 0, sy = 0, sxy = 0, sxx = 0;
+  for (let i = 0; i < n; i++) {
+    const xi = i, yi = toNumKZ_(y[i]);
+    sx += xi;
+    sy += yi;
+    sxy += xi * yi;
+    sxx += xi * xi;
+  }
+  const denom = n * sxx - sx * sx;
+  if (!denom) return { slope: 0, intercept: meanKZ_(y) };
+  const slope = (n * sxy - sx * sy) / denom;
+  const intercept = (sy - slope * sx) / n;
+  return { slope, intercept };
+}
+
+function daysInMonthKZ_(y, m1) {
+  return new Date(y, m1, 0).getDate();
+}
+
+function colIndexByHeaderSoftKZ_(hdrRow, exactHeader) {
+  if (!Array.isArray(hdrRow)) return 0;
+
+  const pozycja = hdrRow.findIndex(function (h) {
+    return String(h || '').trim() === String(exactHeader || '').trim();
+  });
+
+  return (pozycja >= 0) ? (pozycja + 1) : 0;
+}
