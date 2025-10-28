@@ -1,0 +1,120 @@
+/* Klocek #1B — Sprzedaż_okresowa (konto zwykłe) → „Sprzedaż_okresowa_KZ” */
+
+const SRC_SALES_SHEET_REG = 'Zamówienia';
+const OUT_SHEET_REG       = 'Sprzedaż_okresowa_KZ';
+
+const STATUS_HDR_CANDIDATES_REG = ['status','order_status','status zamówienia','status_zamowienia'];
+const FALLBACK_COL_STATUS_REG   = 10; // kolumna J (1-based)
+const ALLOWED_ORDER_STATUSES_REG = new Set([1, 2, 3, 4]);
+
+const DATE_HDR_CANDIDATES_REG = ['created','order_date','created_at','data zamówienia','data_zamowienia','date','order_created','data'];
+const PRODUCTS_HDR_CANDIDATES_REG = ['products','items','line_items','pozycje','pozycje_zamówienia','order_items'];
+
+function cmd_recomputeSalesRegular() {
+  const ui = SpreadsheetApp.getUi();
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(8000)) { ui.alert('Program jest zajęty. Spróbuj za chwilę.'); return; }
+  try {
+    ensureAuth_();
+    requireActivePartner_();
+    SpreadsheetApp.getActive().toast('Liczenie (konto zwykłe)…', 'Programy', 5);
+    buildSalesPeriodsRegular();
+    SpreadsheetApp.getActive().toast('Gotowe ✅', 'Programy', 5);
+  } catch (e) {
+    ui.alert('Błąd przeliczenia (konto zwykłe):\n' + (e && (e.stack || e.message) || e));
+  } finally { lock.releaseLock(); }
+}
+
+function buildSalesPeriodsRegular() {
+  requireActivePartner_();
+  const t0 = new Date();
+  const home = SpreadsheetApp.getActive();
+
+  const srcSS = getSS_Ro_();
+  if (!srcSS) throw new Error('Brak URL dla [Partner] RO w „Partnerzy”.');
+  const srcSh = srcSS.getSheetByName(SRC_SALES_SHEET_REG);
+  if (!srcSh) throw new Error(`W źródle (konto zwykłe) brak zakładki "${SRC_SALES_SHEET_REG}".`);
+
+  const vals = srcSh.getDataRange().getValues();
+  if (vals.length < 2) throw new Error('Źródło (konto zwykłe) nie zawiera danych.');
+
+  const header = vals[0].map(h => String(h || '').trim().toLowerCase());
+  const idxProducts = findCol_(header, PRODUCTS_HDR_CANDIDATES_REG);
+  if (idxProducts === -1) throw new Error('Nie znaleziono kolumny z pozycjami (products/items/line_items/…).');
+
+  const FALLBACK_COL_DATE = 5;
+  const idxDateHdr = findCol_(header, DATE_HDR_CANDIDATES_REG);
+  const idxDate = (idxDateHdr !== -1) ? idxDateHdr : (FALLBACK_COL_DATE - 1);
+  if (idxDate < 0) throw new Error('Nie znaleziono kolumny z datą (ani po nagłówkach, ani fallback do E).');
+
+  const idxStatusHdr = findCol_(header, STATUS_HDR_CANDIDATES_REG);
+  const idxStatus = (idxStatusHdr !== -1) ? idxStatusHdr : (FALLBACK_COL_STATUS_REG - 1);
+
+  // zakres miesięcy: użyj tych samych stałych co FBE
+  const months = monthRange_(START_YEAR, START_MONTH, new Date());
+  const monthIndex = new Map(months.map((m,i)=>[m.key, i]));
+
+  const agg = new Map();
+  for (let r=1; r<vals.length; r++){
+    const row = vals[r];
+    
+    let pass = true;
+    if (idxStatus >= 0 && idxStatus < row.length) {
+      const st = normalizeStatusForRegular_(row[idxStatus]);
+      pass = (st !== null) && ALLOWED_ORDER_STATUSES_REG.has(st);
+    }
+    if (!pass) continue;
+
+    const date = normalizeDate_(row[idxDate]); if (!date) continue;
+    const idxM = monthIndex.get(yyyymmKey_(date));
+    const items = extractItemsFromProducts_(row[idxProducts]); if (!items.length) continue;
+
+    for (const it of items) {
+      const partKey = (it.partKey || '').trim(); if (!partKey) continue;
+      const qty = Number(it.qty || 0) || 1;
+      if (!agg.has(partKey)) agg.set(partKey, { allQty:0, monthly:Array(months.length).fill(0) });
+      const rec = agg.get(partKey);
+      rec.allQty += qty;
+      if (idxM !== undefined) rec.monthly[idxM] += qty;
+    }
+  }
+
+  const headerOut = ['part_number_key','Zamówienia_od_początku', ...months.map(m=>m.label)];
+  const out = [headerOut];
+  for (const [key, rec] of agg) out.push([key, rec.allQty, ...rec.monthly]);
+
+  let outSh = home.getSheetByName(OUT_SHEET_REG) || home.insertSheet(OUT_SHEET_REG);
+  outSh.clearContents();
+  outSh.getRange(1,1,out.length,out[0].length).setValues(out);
+  outSh.setFrozenRows(1);
+
+  SpreadsheetApp.getActive().toast(`(konto zwykłe) gotowe w ${((new Date()-t0)/1000).toFixed(2)}s`, OUT_SHEET_REG, 5);
+
+  try {
+    const adsKzMetrics = readAdsKzMetrics_();
+    refreshTrendyKzMetrics_(adsKzMetrics);
+  } catch (e) {
+    Logger.log('refreshTrendyKzMetrics_ failed after sales recompute: ' + (e && (e.stack || e.message) || e));
+  }
+}
+
+function normalizeStatusForRegular_(value) {
+  if (typeof normalizeStatus_ === 'function') {
+    return normalizeStatus_(value);
+  }
+  if (value === null || typeof value === 'undefined' || value === '') return null;
+  if (value instanceof Date && !isNaN(value)) {
+    const msPerDay = 24 * 60 * 60 * 1000;
+    const epoch = Date.UTC(1899, 11, 30);
+    const utc = Date.UTC(value.getFullYear(), value.getMonth(), value.getDate());
+    const serial = Math.round((utc - epoch) / msPerDay);
+    return Number.isFinite(serial) ? serial : null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+  const match = String(value).trim().match(/-?\d+/);
+  if (!match) return null;
+  const num = Number(match[0]);
+  return Number.isFinite(num) ? Math.trunc(num) : null;
+}
