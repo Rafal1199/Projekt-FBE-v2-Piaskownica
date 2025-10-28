@@ -1,10 +1,8 @@
 /************************************************************
- * Trendy_FBE.gs — trendy + stock + pokrycie + zamówienie (T) + rotacja (U)
+ * Trendy_FBE.gs — trendy + stock + pokrycie + zamówienie (Z) + rotacja (AA)
  * Wejście  : 'Sprzedaż_okresowa_FBE'
  * Wyjście  : 'Trendy_FBE'
  * Stock    : karta 'ADS_FBE' (kolumna „Stock") – opcjonalna
- * 
- * ZMIANA: Usunięto kolumnę "Deficyt_w_miesiącu_1" (była ostatnią kolumną)
  ************************************************************/
 
 // ===== Nazwy arkuszy =====
@@ -12,36 +10,79 @@ const IN_SHEET_TRENDS  = 'Sprzedaż_okresowa_FBE';
 const OUT_SHEET_TRENDS = 'Trendy_FBE';
 
 // ===== Docelowe kolumny na wyniki pomocnicze =====
-const COL_REORDER_PROPOSAL  = 26; // Z (nie będzie resetowana przy przeliczeniu)
-const COL_ROTATION_LEFTOVER = 27; // AA (nie będzie resetowana przy przeliczeniu)
+const COL_REORDER_PROPOSAL  = 26; // Z
+const COL_ROTATION_LEFTOVER = 27; // AA
 
 // ===== Kolorowanie tła dla stocku =====
 const HIGHLIGHT_STOCK_WITH_INTRANSIT = true;
-const INTRANSIT_BG_COLOR = '#e8f1fb'; // delikatny niebieski
+const INTRANSIT_BG_COLOR = '#e8f1fb';
 
 // ===== Parametry trendów =====
 const TREND_WINDOW = 6, MA3_WINDOW=3, MA6_WINDOW=6;
 const EXCLUDE_CURRENT = false, NORM_THRESHOLD = 0.15;
 const PROPORTIONAL_MIN_DAY=10, PROPORTIONAL_CAP=1.6, PROPORTIONAL_MIN_UNITS=0;
 
-// ——— Nagłówki stałe (placeholders) i format końcowy ———
+// ===== Nagłówki stałe (placeholders) =====
 const HEADER_BASE_PROPOSAL = 'Propozycja_zamówienia';
 const HEADER_BASE_LEFTOVER = 'Sztuki_pozostałe_po_[…M]';
 
+/**
+ * Upewnia się, że kolumny Z i AA istnieją i są sformatowane
+ */
 function ensurePersistentHelperColumns_(sh) {
   if (!sh) return;
   ensureColumns_(sh, COL_ROTATION_LEFTOVER);
   const lc = sh.getLastColumn();
   const hdr = sh.getRange(1,1,1,lc).getDisplayValues()[0];
+  
   const curV = String(hdr[COL_REORDER_PROPOSAL-1] || '').trim();
   if (!curV) sh.getRange(1, COL_REORDER_PROPOSAL).setValue(HEADER_BASE_PROPOSAL);
+  
   const curW = String(hdr[COL_ROTATION_LEFTOVER-1] || '').trim();
   if (!curW) sh.getRange(1, COL_ROTATION_LEFTOVER).setValue(HEADER_BASE_LEFTOVER);
+  
+  // ✅ Formatuj nagłówki Z i AA
+  try {
+    const LIGHT_GREEN = '#b7e1cd';
+    const rngZ = sh.getRange(1, COL_REORDER_PROPOSAL);
+    const rngAA = sh.getRange(1, COL_ROTATION_LEFTOVER);
+    
+    [rngZ, rngAA].forEach(r => {
+      r.setFontFamily('Arial')
+       .setFontSize(10)
+       .setFontWeight('bold')
+       .setHorizontalAlignment('center')
+       .setVerticalAlignment('middle')
+       .setBackground(LIGHT_GREEN);
+    });
+  } catch (e) {
+    Logger.log('Formatting Z/AA headers failed: ' + e);
+  }
 }
 
+/**
+ * Ustawia nagłówek kolumny i czyści jej zawartość, zachowując formatowanie
+ */
 function setColumnHeaderAndClear_(sh, col1, newHeader) {
   const lr = Math.max(2, sh.getLastRow());
-  sh.getRange(1, col1).setValue(newHeader);
+  const headerCell = sh.getRange(1, col1);
+  headerCell.setValue(newHeader);
+  
+  // ✅ Formatuj nagłówek
+  try {
+    const LIGHT_GREEN = '#b7e1cd';
+    headerCell
+      .setFontFamily('Arial')
+      .setFontSize(10)
+      .setFontWeight('bold')
+      .setHorizontalAlignment('center')
+      .setVerticalAlignment('middle')
+      .setBackground(LIGHT_GREEN);
+  } catch (e) {
+    Logger.log('Header formatting failed for col ' + col1 + ': ' + e);
+  }
+  
+  // Wyczyść dane w kolumnie (nie nagłówek)
   if (lr > 1) {
     const rng = sh.getRange(2, col1, lr-1, 1);
     try { rng.clearContent(); } catch(_){}
@@ -52,10 +93,8 @@ function setColumnHeaderAndClear_(sh, col1, newHeader) {
 
 /* ============================================================
  *   GŁÓWNA TABELA: liczenie trendów FBE + stock + pokrycie
- *   ZMIANA: Usunięto kolumnę Deficyt_w_miesiącu_1
  * ============================================================ */
 function computeTrendsFromSalesPeriods(mult1, mult2, mult3) {
-  // Domyślnie 0% jeśli nie podano
   mult1 = Number(mult1) || 0;
   mult2 = Number(mult2) || 0;
   mult3 = Number(mult3) || 0;
@@ -96,7 +135,6 @@ function computeTrendsFromSalesPeriods(mult1, mult2, mult3) {
   }
   if (useLast < 0) throw new Error('Za mało miesięcy po odjęciu bieżącego.');
 
-  // ===== ZMIANA: Dynamiczne nagłówki dla prognoz =====
   const formatMultiplier = (m) => {
     if (m === 0) return '';
     const sign = m > 0 ? '+' : '';
@@ -116,10 +154,10 @@ function computeTrendsFromSalesPeriods(mult1, mult2, mult3) {
   ]];
 
   for (let r=1; r<vals.length; r++) {
-    const key = String(vals[r][0]||'').trim(); if (!key) continue;
+    const key = String(vals[r][0]||'').trim(); 
+    if (!key) continue;
 
     const info = lookupProductInfo_(productInfoMap, key);
-
     const series = monthCols.map(mc => toNum_(vals[r][mc.colIdx0]));
 
     if (lastIsCurrent && scaleCurrent) {
@@ -141,10 +179,8 @@ function computeTrendsFromSalesPeriods(mult1, mult2, mult3) {
     const slope = linreg_(tailWindow_(series, useLast, MA6_WINDOW)).slope;
 
     const cls = (slope > 0.5 ? '▲ rośnie' : (slope < -0.5 ? '▼ spada' : '▶ stabilny'));
-
     const performance = performanceMap.has(key) ? performanceMap.get(key) : '';
 
-    // ===== ZMIANA: Obliczanie prognoz bazowych, potem mnożenie =====
     const fc1_base = Math.max(0, Math.round(avg3 + 1 * slope));
     const fc2_base = Math.max(0, Math.round(avg3 + 2 * slope));
     const fc3_base = Math.max(0, Math.round(avg3 + 3 * slope));
@@ -179,7 +215,6 @@ function computeTrendsFromSalesPeriods(mult1, mult2, mult3) {
     const net = priceNetMap.has(key) ? Number(priceNetMap.get(key)) : '';
     const gross = (net === '' ? '' : round_(net * (1 + VAT_RO), 2));
 
-    // ZMIANA: usunięto deficitM1 i coverMonths (duplikat info z coverageMsg)
     out.push([
       key,
       info ? info.id  : '',
@@ -199,7 +234,6 @@ function computeTrendsFromSalesPeriods(mult1, mult2, mult3) {
       stockTotal,
       net, gross,
       coverageMsg
-      // USUNIĘTO: coverMonths (duplikat), deficitM1
     ]);
   }
 
@@ -213,6 +247,22 @@ function computeTrendsFromSalesPeriods(mult1, mult2, mult3) {
   outSh.getRange(1, 1, lastRowExisting, baseCols).clearContent();
   outSh.getRange(1, 1, out.length, baseCols).setValues(out);
   outSh.setFrozenRows(1);
+
+  // ✅ 1. NAJPIERW utwórz kolumny pomocnicze Z i AA
+  try {
+    ensurePersistentHelperColumns_(outSh);
+    Logger.log('Trendy_FBE: Kolumny Z i AA utworzone');
+  } catch (e) {
+    Logger.log('ensurePersistentHelperColumns_ failed: ' + (e && (e.stack || e.message) || e));
+  }
+
+  // ✅ 2. POTEM formatuj WSZYSTKIE nagłówki (A-AA)
+  try {
+    applySingleSheetHeaderStyling_(outSh);
+    Logger.log('Trendy_FBE: Formatowanie zastosowane dla ' + outSh.getLastColumn() + ' kolumn');
+  } catch (e) {
+    Logger.log('applySingleSheetHeaderStyling_ failed: ' + (e && (e.stack || e.message) || e));
+  }
 
   // Adnotacje dla Stock
   try {
@@ -261,7 +311,7 @@ function computeTrendsFromSalesPeriods(mult1, mult2, mult3) {
     Logger.log('Stock annotation failed: ' + (e && (e.stack || e.message) || e));
   }
 
-  // KRYTYCZNE: formatowanie warunkowe dla pokrycia
+  // Formatowanie warunkowe dla pokrycia
   try { 
     ensureCoverageFormatting_(outSh); 
     SpreadsheetApp.flush();
@@ -270,7 +320,17 @@ function computeTrendsFromSalesPeriods(mult1, mult2, mult3) {
   }
 
   try { flagLow3mOnTrendy_(outSh); } catch (e) { Logger.log('flagLow3mOnTrendy_ skipped: ' + e); }
-  
+
+  // ✅ 3. Dopasuj szerokości WSZYSTKICH kolumn
+  try {
+    const currentLc = outSh.getLastColumn();
+    const currentHeader = outSh.getRange(1, 1, 1, currentLc).getDisplayValues()[0];
+    applyDefaultHeaderWidths_(outSh, currentHeader);
+    Logger.log('Trendy_FBE: Szerokości dopasowane dla ' + currentLc + ' kolumn');
+  } catch (e) {
+    Logger.log('applyDefaultHeaderWidths_ failed: ' + (e && (e.message || e)));
+  }
+
   SpreadsheetApp.flush();
 }
 
@@ -332,8 +392,8 @@ function readAdsFbeMaps_() {
   if (idxKey === -1) return { stockMap, priceNetMap, performanceMap };
   
   const idxStock = findAny_(header, ['stock','stoc']);
-  const colNetPrice0 = 15; // kolumna P (0-based: 15)
-  const colPerformance0 = 16; // kolumna Q (0-based: 16)
+  const colNetPrice0 = 15;
+  const colPerformance0 = 16;
   const hasPrice = colNetPrice0 < width;
   const hasPerformance = colPerformance0 < width;
 
@@ -375,10 +435,6 @@ function readNetPriceMap_FBE_() {
   return readAdsFbeMaps_().priceNetMap;
 }
 
-/**
- * Czyta „Dostawa w drodze": PNK w kolumnie F (6), ilość w kolumnie Q (17).
- * Zwraca Map<PNK, suma_qty>
- */
 function readInTransitMap_() {
   const ss = SpreadsheetApp.getActive();
   const sh = ss.getSheetByName('Dostawa w drodze');
@@ -405,7 +461,6 @@ function readInTransitMap_() {
   return map;
 }
 
-/** Czyta arkusz "Podstawowe Informacje" z pliku partnera. */
 function readPartnerProductInfoMap_() {
   const map = new Map();
   if (typeof getSS_ProdRoFbe_ !== 'function') return map;
@@ -482,9 +537,6 @@ function lookupProductInfo_(map, key) {
   return map.get(norm) || null;
 }
 
-/**
- * Czyta limity wysyłki do FBE z arkusza ADS_KZ.
- */
 function readAdsKzLimitMap_(){
   const map = new Map();
   const ss = SpreadsheetApp.getActive();
@@ -534,7 +586,7 @@ function buildRemainThisMonthMap_(inSh) {
 }
 
 /* ============================================================
- *   PROPOZYCJA ZAMÓWIENIA → NADPISUJEMY KOLUMNĘ Z (była AA)
+ *   PROPOZYCJA ZAMÓWIENIA → KOLUMNA Z
  * ============================================================ */
 function applyReorderProposalFBE(targetM){
   const ss   = SpreadsheetApp.getActive();
@@ -553,12 +605,11 @@ function applyReorderProposalFBE(targetM){
 
   const hdrO = out.getRange(1,1,1,lcO0).getDisplayValues()[0];
 
-  // Funkcja pomocnicza do szukania kolumny po prefiksie (obsługuje nagłówki z mnożnikami)
   const findColByPrefix = (headers, prefix) => {
     for (let i = 0; i < headers.length; i++) {
       const h = String(headers[i] || '').trim();
       if (h === prefix || h.startsWith(prefix + ' [') || h.startsWith(prefix + '[')) {
-        return i + 1; // zwróć indeks 1-based
+        return i + 1;
       }
     }
     return 0;
@@ -650,9 +701,103 @@ function applyReorderProposalFBE(targetM){
 }
 
 /* ============================================================
+ *   ROTACJA / POZOSTAŁE SZTUKI → KOLUMNA AA
+ * ============================================================ */
+function applyRotationCheckFBE(targetM){
+  const ss   = SpreadsheetApp.getActive();
+  const out  = ss.getSheetByName(OUT_SHEET_TRENDS);
+  const inSh = ss.getSheetByName(IN_SHEET_TRENDS);
+  if (!out)  throw new Error('Brak arkusza "'+OUT_SHEET_TRENDS+'". Najpierw policz trendy.');
+  if (!inSh) throw new Error('Brak arkusza "'+IN_SHEET_TRENDS+'".');
+
+  ensureColumns_(out, COL_ROTATION_LEFTOVER);
+
+  const lrO = out.getLastRow(), lcO0 = out.getLastColumn();
+  if (lrO < 2) return;
+
+  const hdrO = out.getRange(1,1,1,lcO0).getDisplayValues()[0];
+
+  const findColByPrefix = (headers, prefix) => {
+    for (let i = 0; i < headers.length; i++) {
+      const h = String(headers[i] || '').trim();
+      if (h === prefix || h.startsWith(prefix + ' [') || h.startsWith(prefix + '[')) {
+        return i + 1;
+      }
+    }
+    return 0;
+  };
+
+  const cKey    = colIndexByHeaderSoft_FBE(hdrO, 'part_number_key');
+  const cF1     = findColByPrefix(hdrO, 'Prognoza_nast_M');
+  const cF2     = findColByPrefix(hdrO, 'Prognoza_+2M');
+  const cF3     = findColByPrefix(hdrO, 'Prognoza_+3M');
+  const cSlope  = colIndexByHeaderSoft_FBE(hdrO, 'Slope_6M');
+  const cStock  = colIndexByHeaderSoft_FBE(hdrO, 'Stock');
+  
+  if (!(cKey && cF1 && cF2 && cF3 && cSlope && cStock)) {
+    Logger.log('DEBUG kolumny w Trendy_FBE (rotacja):');
+    Logger.log('Nagłówki: ' + JSON.stringify(hdrO));
+    Logger.log('cKey=' + cKey + ', cF1=' + cF1 + ', cF2=' + cF2 + ', cF3=' + cF3 + ', cSlope=' + cSlope + ', cStock=' + cStock);
+    throw new Error('Brakuje kolumn: part_number_key / Prognoza_* / Slope_6M / Stock w "'+OUT_SHEET_TRENDS+'". Sprawdź logi.');
+  }
+
+  const label = `Sztuki_pozostałe_po_[${String(targetM).replace('.',',')}M]`;
+  setColumnHeaderAndClear_(out, COL_ROTATION_LEFTOVER, label);
+
+  const body = out.getRange(2, 1, lrO-1, Math.max(lcO0, cStock, cF3, cSlope)).getValues();
+  const result = [];
+  const M = Math.max(0, Number(targetM) || 0);
+  const Mfull = Math.floor(M);
+  const Mfrac = M - Mfull;
+
+  for (let i=0; i<body.length; i++){
+    const row    = body[i];
+    const f1     = Math.max(0, Number(row[cF1-1]||0));
+    const f2     = Math.max(0, Number(row[cF2-1]||0));
+    const f3     = Math.max(0, Number(row[cF3-1]||0));
+    const slope  = Number(row[cSlope-1]||0);
+    let   stock  = Math.max(0, Number(row[cStock-1]||0));
+
+    let need = 0;
+
+    if (Mfull >= 1) need += f1;
+    if (Mfull >= 2) need += f2;
+    if (Mfull >= 3) need += f3;
+
+    if (Mfull > 3) {
+      let prev = f3;
+      for (let k = 4; k <= Mfull; k++){
+        prev = Math.max(0, Math.round(prev + slope));
+        need += prev;
+        if (stock - need <= 0) break;
+      }
+    }
+
+    if (Mfrac > 0) {
+      let nextMonthForecast;
+      if (Mfull === 0)       nextMonthForecast = f1;
+      else if (Mfull === 1)  nextMonthForecast = f2;
+      else if (Mfull === 2)  nextMonthForecast = f3;
+      else                   nextMonthForecast = Math.max(0, Math.round(f3 + slope * (Mfull - 2)));
+      need += nextMonthForecast * Mfrac;
+    }
+
+    const leftover = Math.max(0, Math.ceil(stock - need));
+    result.push([leftover]);
+  }
+
+  out.getRange(2, COL_ROTATION_LEFTOVER, result.length, 1).setValues(result);
+
+  try {
+    const rng = out.getRange(2, COL_ROTATION_LEFTOVER, result.length, 1);
+    const bg = result.map(([v]) => [Number(v||0) === 0 ? '#e6f4ea' : '#fde7e9']);
+    rng.setBackgrounds(bg);
+  } catch(_) {}
+}
+
+/* ============================================================
  *   UTILITIES (lokalne)
  * ============================================================ */
-
 function ensureColumns_(sh, colMin){
   const lc = sh.getLastColumn();
   if (lc < colMin) sh.insertColumnsAfter(lc, colMin - lc);
@@ -703,15 +848,18 @@ function parseHeaderMonth_(h){
   if (!(mm>=1 && mm<=12)) return null;
   return { label:`${String(mm).padStart(2,'0')}-${yyyy}`, y:yyyy, m:mm };
 }
+
 function sumTail_(arr, endIdx, win){ let s=0; for (let i=Math.max(0,endIdx-win+1); i<=endIdx; i++) s+=toNum_(arr[i]); return s; }
 function avgFromSum_(sum, cnt){ return cnt>0 ? sum/cnt : 0; }
 function tailWindow_(arr,endIdx,win){ const st=Math.max(0,endIdx-win+1); return arr.slice(st,endIdx+1).map(toNum_); }
+
 function linreg_(y){
   const n=y.length; let sx=0, sy=0, sxy=0, sxx=0;
   for (let i=0;i<n;i++){ const xi=i, yi=toNum_(y[i]); sx+=xi; sy+=yi; sxy+=xi*yi; sxx+=xi*xi; }
   const denom = n*sxx - sx*sx; if (!denom) return { slope:0, intercept:mean_(y) };
   const slope = (n*sxy - sx*sy) / denom; const intercept=(sy - slope*sx) / n; return { slope, intercept };
 }
+
 function colIndexByHeaderSoft_FBE(hdrRow, exactHeader) {
   if (!Array.isArray(hdrRow)) return 0;
   
@@ -721,6 +869,7 @@ function colIndexByHeaderSoft_FBE(hdrRow, exactHeader) {
   
   return (pozycja >= 0) ? (pozycja + 1) : 0;
 }
+
 function findAny_(lowerHdrRow, candidatesLower){
   for (const name of candidatesLower){
     const i = lowerHdrRow.indexOf(String(name).toLowerCase());
@@ -728,6 +877,7 @@ function findAny_(lowerHdrRow, candidatesLower){
   }
   return -1;
 }
+
 function ensureCoverageFormatting_(sh) {
   if (!sh) return;
   const lastRow = Math.max(2, sh.getLastRow());
@@ -801,7 +951,30 @@ function cmd_reorderProposalFBE(){
   } finally { lock.releaseLock(); }
 }
 
-// ========= Custom kolumny z ADS_FBE → Trendy_FBE (po PNK) =========
+function cmd_rotationCheckFBE(){
+  const ui = SpreadsheetApp.getUi();
+  const resp = ui.prompt(
+    'Rotacja / pozostałe sztuki (FBE)',
+    'Podaj horyzont w miesiącach (może być ułamek, np. 2.5). Po tym czasie pokażemy, ile sztuk zostanie.',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+  const targetM = Number(String(resp.getResponseText()||'').replace(',','.'));
+  if (!isFinite(targetM) || targetM <= 0) { ui.alert('Podaj dodatnią liczbę (np. 2 lub 1.5).'); return; }
+
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(8000)) { ui.alert('Program jest zajęty. Spróbuj za chwilę.'); return; }
+  try {
+    if (typeof ensureAuthWithPartner_ === 'function') ensureAuthWithPartner_();
+    if (typeof requireActivePartner_ === 'function')  requireActivePartner_();
+    applyRotationCheckFBE(targetM);
+    SpreadsheetApp.getActive().toast('Obliczono pozostałe sztuki ✅', 'Programy', 5);
+  } catch (e) {
+    ui.alert('Błąd kalkulacji rotacji:\n' + (e && (e.stack || e.message) || e));
+  } finally { lock.releaseLock(); }
+}
+
+// ========= Custom kolumny z ADS_FBE → Trendy_FBE =========
 const CUSTOM_COL_PREFIX = 'ADS: ';
 const CUSTOM_COL_MAX    = 10;
 
@@ -896,7 +1069,20 @@ function applySelectedAdsFbeColumns(selectedHeaders) {
     }
     const col1 = insertAt; insertAt++;
 
-    outSh.getRange(1, col1).setValue(CUSTOM_COL_PREFIX + selHdr).setFontWeight('bold');
+    const headerCell = outSh.getRange(1, col1);
+    headerCell.setValue(CUSTOM_COL_PREFIX + selHdr);
+    try {
+      const LIGHT_GREEN = '#b7e1cd';
+      headerCell
+        .setFontFamily('Arial')
+        .setFontSize(10)
+        .setFontWeight('bold')
+        .setHorizontalAlignment('center')
+        .setVerticalAlignment('middle')
+        .setBackground(LIGHT_GREEN);
+    } catch (e) {
+      Logger.log('Custom column header formatting failed: ' + e);
+    }
 
     const dataRng = outSh.getRange(2, col1, keysOut.length, 1);
     neutralizeRangeFormatting_(dataRng);
@@ -928,160 +1114,4 @@ function applySelectedAdsFbeColumns(selectedHeaders) {
 
 function getAdsFbeHeadersForPicker() {
   return getAdsFbeHeadersForPicker_();
-}
-
-function debugColIndex() {
-  Logger.log('=== TEST 1: Czy funkcja istnieje? ===');
-  Logger.log('Typ: ' + typeof colIndexByHeaderSoft_);
-  
-  Logger.log('\n=== TEST 2: Prosty test ===');
-  const result = colIndexByHeaderSoft_FBE(['A', 'B', 'C'], 'B');
-  Logger.log('Wynik: ' + result + ' (oczekiwane: 2)');
-  Logger.log('Typ wyniku: ' + typeof result);
-  
-  Logger.log('\n=== TEST 3: Z prawdziwymi danymi ===');
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName('Trendy_FBE');
-  if (!sh) {
-    Logger.log('❌ Brak arkusza Trendy_FBE');
-    return;
-  }
-  
-  const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getDisplayValues()[0];
-  Logger.log('Nagłówki z arkusza: ' + JSON.stringify(headers));
-  
-  Logger.log('\n=== TEST 4: Szukanie kolumn ===');
-  const cKey = colIndexByHeaderSoft_FBE(headers, 'part_number_key');
-  Logger.log('part_number_key → ' + cKey + ' (typ: ' + typeof cKey + ')');
-  
-  const cStock = colIndexByHeaderSoft_FBE(headers, 'Stock');
-  Logger.log('Stock → ' + cStock + ' (typ: ' + typeof cStock + ')');
-  
-  const cF1 = colIndexByHeaderSoft_FBE(headers, 'Prognoza_nast_M');
-  Logger.log('Prognoza_nast_M → ' + cF1 + ' (typ: ' + typeof cF1 + ')');
-  
-  if (cKey && cStock && cF1) {
-    Logger.log('\n✅ WSZYSTKIE KOLUMNY ZNALEZIONE!');
-  } else {
-    Logger.log('\n❌ PROBLEM: Funkcja zwraca undefined mimo że kolumny istnieją');
-  }
-}
-
-/* ============================================================
- *   ROTACJA / POZOSTAŁE SZTUKI → NADPISUJEMY KOLUMNĘ AB
- * ============================================================ */
-function applyRotationCheckFBE(targetM){
-  const ss   = SpreadsheetApp.getActive();
-  const out  = ss.getSheetByName(OUT_SHEET_TRENDS);
-  const inSh = ss.getSheetByName(IN_SHEET_TRENDS);
-  if (!out)  throw new Error('Brak arkusza "'+OUT_SHEET_TRENDS+'". Najpierw policz trendy.');
-  if (!inSh) throw new Error('Brak arkusza "'+IN_SHEET_TRENDS+'".');
-
-  ensureColumns_(out, COL_ROTATION_LEFTOVER);
-
-  const lrO = out.getLastRow(), lcO0 = out.getLastColumn();
-  if (lrO < 2) return;
-
-  const hdrO = out.getRange(1,1,1,lcO0).getDisplayValues()[0];
-
-  // Funkcja pomocnicza do szukania kolumny po prefiksie
-  const findColByPrefix = (headers, prefix) => {
-    for (let i = 0; i < headers.length; i++) {
-      const h = String(headers[i] || '').trim();
-      if (h === prefix || h.startsWith(prefix + ' [') || h.startsWith(prefix + '[')) {
-        return i + 1;
-      }
-    }
-    return 0;
-  };
-
-  const cKey    = colIndexByHeaderSoft_FBE(hdrO, 'part_number_key');
-  const cF1     = findColByPrefix(hdrO, 'Prognoza_nast_M');
-  const cF2     = findColByPrefix(hdrO, 'Prognoza_+2M');
-  const cF3     = findColByPrefix(hdrO, 'Prognoza_+3M');
-  const cSlope  = colIndexByHeaderSoft_FBE(hdrO, 'Slope_6M');
-  const cStock  = colIndexByHeaderSoft_FBE(hdrO, 'Stock');
-  
-  if (!(cKey && cF1 && cF2 && cF3 && cSlope && cStock)) {
-    Logger.log('DEBUG kolumny w Trendy_FBE (rotacja):');
-    Logger.log('Nagłówki: ' + JSON.stringify(hdrO));
-    Logger.log('cKey=' + cKey + ', cF1=' + cF1 + ', cF2=' + cF2 + ', cF3=' + cF3 + ', cSlope=' + cSlope + ', cStock=' + cStock);
-    throw new Error('Brakuje kolumn: part_number_key / Prognoza_* / Slope_6M / Stock w "'+OUT_SHEET_TRENDS+'". Sprawdź logi.');
-  }
-
-  const label = `Sztuki_pozostałe_po_[${String(targetM).replace('.',',')}M]`;
-  setColumnHeaderAndClear_(out, COL_ROTATION_LEFTOVER, label);
-
-  const body = out.getRange(2, 1, lrO-1, Math.max(lcO0, cStock, cF3, cSlope)).getValues();
-  const result = [];
-  const M = Math.max(0, Number(targetM) || 0);
-  const Mfull = Math.floor(M);
-  const Mfrac = M - Mfull;
-
-  for (let i=0; i<body.length; i++){
-    const row    = body[i];
-    const f1     = Math.max(0, Number(row[cF1-1]||0));
-    const f2     = Math.max(0, Number(row[cF2-1]||0));
-    const f3     = Math.max(0, Number(row[cF3-1]||0));
-    const slope  = Number(row[cSlope-1]||0);
-    let   stock  = Math.max(0, Number(row[cStock-1]||0));
-
-    let need = 0;
-
-    if (Mfull >= 1) need += f1;
-    if (Mfull >= 2) need += f2;
-    if (Mfull >= 3) need += f3;
-
-    if (Mfull > 3) {
-      let prev = f3;
-      for (let k = 4; k <= Mfull; k++){
-        prev = Math.max(0, Math.round(prev + slope));
-        need += prev;
-        if (stock - need <= 0) break;
-      }
-    }
-
-    if (Mfrac > 0) {
-      let nextMonthForecast;
-      if (Mfull === 0)       nextMonthForecast = f1;
-      else if (Mfull === 1)  nextMonthForecast = f2;
-      else if (Mfull === 2)  nextMonthForecast = f3;
-      else                   nextMonthForecast = Math.max(0, Math.round(f3 + slope * (Mfull - 2)));
-      need += nextMonthForecast * Mfrac;
-    }
-
-    const leftover = Math.max(0, Math.ceil(stock - need));
-    result.push([leftover]);
-  }
-
-  out.getRange(2, COL_ROTATION_LEFTOVER, result.length, 1).setValues(result);
-
-  try {
-    const rng = out.getRange(2, COL_ROTATION_LEFTOVER, result.length, 1);
-    const bg = result.map(([v]) => [Number(v||0) === 0 ? '#e6f4ea' : '#fde7e9']);
-    rng.setBackgrounds(bg);
-  } catch(_) {}
-}
-
-function cmd_rotationCheckFBE(){
-  const ui = SpreadsheetApp.getUi();
-  const resp = ui.prompt(
-    'Rotacja / pozostałe sztuki (FBE)',
-    'Podaj horyzont w miesiącach (może być ułamek, np. 2.5). Po tym czasie pokażemy, ile sztuk zostanie.',
-    ui.ButtonSet.OK_CANCEL
-  );
-  if (resp.getSelectedButton() !== ui.Button.OK) return;
-  const targetM = Number(String(resp.getResponseText()||'').replace(',','.'));
-  if (!isFinite(targetM) || targetM <= 0) { ui.alert('Podaj dodatnią liczbę (np. 2 lub 1.5).'); return; }
-
-  const lock = LockService.getDocumentLock();
-  if (!lock.tryLock(8000)) { ui.alert('Program jest zajęty. Spróbuj za chwilę.'); return; }
-  try {
-    if (typeof ensureAuthWithPartner_ === 'function') ensureAuthWithPartner_();
-    if (typeof requireActivePartner_ === 'function')  requireActivePartner_();
-    applyRotationCheckFBE(targetM);
-    SpreadsheetApp.getActive().toast('Obliczono pozostałe sztuki ✅', 'Programy', 5);
-  } catch (e) {
-    ui.alert('Błąd kalkulacji rotacji:\n' + (e && (e.stack || e.message) || e));
-  } finally { lock.releaseLock(); }
 }
