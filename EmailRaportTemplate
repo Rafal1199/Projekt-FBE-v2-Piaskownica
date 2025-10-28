@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8"> <!-- ✅ TO -->
+  <base target="_top">
+  <style>
+    body { font-family: Arial, sans-serif; color: #333; line-height: 1.6; }
+    .header { background: #1a73e8; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }
+    .header h1 { margin: 0; font-size: 24px; }
+    .header p { margin: 10px 0 0; font-size: 14px; }
+    .section { margin: 20px; }
+    .section h2 { color: #1a73e8; font-size: 18px; margin-bottom: 10px; }
+    table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+    th { background: #f8f9fa; padding: 12px; text-align: left; border: 1px solid #ddd; font-weight: 600; }
+    td { padding: 10px; border: 1px solid #ddd; }
+    .highlight { background: #fef7e0; font-weight: bold; }
+    .footer { margin-top: 40px; padding: 20px; background: #f8f9fa; font-size: 12px; border-radius: 0 0 8px 8px; text-align: center; }
+    ul { line-height: 1.8; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>📦 Raport uzupełnienia magazynu FBE</h1>
+    <p>Partner: <strong><?= report.partner ?></strong> | Data: <?= formatDate_(report.date) ?></p>
+  </div>
+  
+  <div class="section">
+    <h2>📊 Podsumowanie</h2>
+    <ul>
+      <li>Produkty do uzupełnienia (FBE): <strong><?= report.summary.totalFBE ?></strong></li>
+      <li>Propozycje nowych produktów (KZ): <strong><?= report.summary.totalKZ ?></strong></li>
+      <li>Szacowana wartość zamówienia: <strong><?= report.summary.totalValue ?> RON</strong></li>
+    </ul>
+  </div>
+  
+  <? if (report.productsFBE.length > 0) { ?>
+  <div class="section">
+    <h2>🔴 Produkty do pilnego uzupełnienia na FBE</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>EAN</th>
+          <th>ID</th>
+          <th>SKU</th>
+          <th>Sprzedaż 3M</th>
+          <th>Stock</th>
+          <th>Prognoza M+1</th>
+          <th>Do zamówienia</th>
+          <th>Klasyfikacja</th>
+        </tr>
+      </thead>
+      <tbody>
+        <? report.productsFBE.forEach(function(p) { ?>
+        <tr>
+          <td><?= p.ean || '-' ?></td>
+          <td><?= p.id || '-' ?></td>
+          <td><?= p.sku || '-' ?></td>
+          <td><?= p.sum3m ?></td>
+          <td><?= p.stock ?></td>
+          <td><?= p.fc1 ?></td>
+          <td class="highlight"><?= p.toOrder ?></td>
+          <td><?= p.classification || '-' ?></td>
+        </tr>
+        <? }); ?>
+      </tbody>
+    </table>
+  </div>
+  <? } ?>
+  
+  <? if (report.productsKZ.length > 0) { ?>
+  <div class="section">
+    <h2>💡 Propozycje nowych produktów na FBE</h2>
+    <p>Poniższe produkty dobrze sprzedają się na koncie zwykłym, ale nie ma ich jeszcze na FBE:</p>
+    <table>
+      <thead>
+        <tr>
+          <th>EAN</th>
+          <th>ID</th>
+          <th>SKU</th>
+          <th>Sprzedaż 3M (KZ)</th>
+          <th>Średnia/miesiąc</th>
+          <th>Klasyfikacja</th>
+        </tr>
+      </thead>
+      <tbody>
+        <? report.productsKZ.forEach(function(p) { ?>
+        <tr>
+          <td><?= p.ean || '-' ?></td>
+          <td><?= p.id || '-' ?></td>
+          <td><?= p.sku || '-' ?></td>
+          <td><?= p.sum3m ?></td>
+          <td><?= p.avg3m ?></td>
+          <td><?= p.classification || '-' ?></td>
+        </tr>
+        <? }); ?>
+      </tbody>
+    </table>
+  </div>
+  <? } ?>
+  
+  <div class="footer">
+    <p><strong>Olimp Marketplace</strong></p>
+    <p>📧 <a href="mailto:rafalporeba@olimpmarketplace.com">rafalporeba@olimpmarketplace.com</a></p>
+    <p>🌐 <a href="https://olimpmarketplace.com">olimpmarketplace.com</a></p>
+    <p style="margin-top: 10px; color: #666;">
+      Raport wygenerowany automatycznie z systemu zarządzania zapasami Olimp Marketplace.
+    </p>
+  </div>
+</body>
+</html>
